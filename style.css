@@ -383,3 +383,15 @@ button:disabled { opacity: .55; cursor: not-allowed; }
     width: 100%;
   }
 }
+
+
+.paper-size-box .rebuild-row {
+  margin-top: 12px;
+  justify-content: flex-start;
+}
+.paper-size-box .quality-row {
+  margin-top: 12px;
+}
+.paper-size-box .quality-row select {
+  min-width: 190px;
+}

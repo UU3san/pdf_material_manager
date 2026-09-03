@@ -1226,21 +1226,170 @@
     }
   }
 
-  async function addImageAsPaperPage(pdfDoc, item, rotation) {
-    const finalRotation = normalizedRotation(rotation);
-    const rotated = await rotateImageFile(item.file, finalRotation);
-    let image;
+  function rotateCanvas(sourceCanvas, rotation) {
+    const r = normalizedRotation(rotation);
+    if (r === 0) return sourceCanvas;
 
-    if (rotated.kind === "png") image = await pdfDoc.embedPng(rotated.bytes);
-    else image = await pdfDoc.embedJpg(rotated.bytes);
+    const swap = r === 90 || r === 270;
+    const canvas = document.createElement("canvas");
+    canvas.width = swap ? sourceCanvas.height : sourceCanvas.width;
+    canvas.height = swap ? sourceCanvas.width : sourceCanvas.height;
 
-    // IMPORTANT:
-    // 90° / 270° means the PDF page box itself becomes landscape.
-    // This prevents a rotated B4 scan from being shrunk inside a portrait page.
-    const paper = getOrientedPaperSize(finalRotation);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(r * Math.PI / 180);
+    ctx.drawImage(
+      sourceCanvas,
+      -sourceCanvas.width / 2,
+      -sourceCanvas.height / 2
+    );
+    return canvas;
+  }
+
+  function cropCanvasToVisibleContent(sourceCanvas) {
+    if (!$("autoCropMargins")?.checked) return sourceCanvas;
+
+    const maxSide = 1200;
+    const sampleScale = Math.min(
+      1,
+      maxSide / Math.max(sourceCanvas.width, sourceCanvas.height)
+    );
+
+    const sample = document.createElement("canvas");
+    sample.width = Math.max(1, Math.round(sourceCanvas.width * sampleScale));
+    sample.height = Math.max(1, Math.round(sourceCanvas.height * sampleScale));
+
+    const sctx = sample.getContext("2d", { willReadFrequently: true });
+    sctx.fillStyle = "#ffffff";
+    sctx.fillRect(0, 0, sample.width, sample.height);
+    sctx.drawImage(sourceCanvas, 0, 0, sample.width, sample.height);
+
+    const data = sctx.getImageData(0, 0, sample.width, sample.height).data;
+
+    let minX = sample.width;
+    let minY = sample.height;
+    let maxX = -1;
+    let maxY = -1;
+
+    // Fairly conservative threshold: detect text/lines/scan shadows,
+    // while treating near-white page margins as removable.
+    const threshold = 244;
+
+    for (let y = 0; y < sample.height; y++) {
+      for (let x = 0; x < sample.width; x++) {
+        const i = (y * sample.width + x) * 4;
+        const a = data[i + 3] / 255;
+        const r = data[i] * a + 255 * (1 - a);
+        const g = data[i + 1] * a + 255 * (1 - a);
+        const b = data[i + 2] * a + 255 * (1 - a);
+        const gray = (r + g + b) / 3;
+
+        if (gray < threshold) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (maxX < minX || maxY < minY) return sourceCanvas;
+
+    const bboxW = maxX - minX + 1;
+    const bboxH = maxY - minY + 1;
+    const bboxAreaRatio =
+      (bboxW * bboxH) / (sample.width * sample.height);
+
+    // Avoid absurd enlargement when a page only contains a tiny mark.
+    if (bboxAreaRatio < 0.06) return sourceCanvas;
+
+    // If content already fills almost the entire page, cropping adds no value.
+    if (
+      minX < sample.width * 0.025 &&
+      minY < sample.height * 0.025 &&
+      maxX > sample.width * 0.975 &&
+      maxY > sample.height * 0.975
+    ) {
+      return sourceCanvas;
+    }
+
+    // Add padding around content so it does not touch page edges.
+    const padX = Math.max(8, Math.round(bboxW * 0.035));
+    const padY = Math.max(8, Math.round(bboxH * 0.035));
+
+    minX = Math.max(0, minX - padX);
+    minY = Math.max(0, minY - padY);
+    maxX = Math.min(sample.width - 1, maxX + padX);
+    maxY = Math.min(sample.height - 1, maxY + padY);
+
+    const scaleBack = 1 / sampleScale;
+    const sx = Math.max(0, Math.floor(minX * scaleBack));
+    const sy = Math.max(0, Math.floor(minY * scaleBack));
+    const sw = Math.min(
+      sourceCanvas.width - sx,
+      Math.ceil((maxX - minX + 1) * scaleBack)
+    );
+    const sh = Math.min(
+      sourceCanvas.height - sy,
+      Math.ceil((maxY - minY + 1) * scaleBack)
+    );
+
+    if (sw <= 0 || sh <= 0) return sourceCanvas;
+
+    const cropped = document.createElement("canvas");
+    cropped.width = sw;
+    cropped.height = sh;
+    const cctx = cropped.getContext("2d", { willReadFrequently: true });
+    cctx.fillStyle = "#ffffff";
+    cctx.fillRect(0, 0, sw, sh);
+    cctx.drawImage(
+      sourceCanvas,
+      sx, sy, sw, sh,
+      0, 0, sw, sh
+    );
+
+    return cropped;
+  }
+
+  function getPaperSizeForCanvas(canvas) {
+    const base = getSelectedPaperSize();
+
+    if (canvas.width > canvas.height) {
+      return {
+        key: base.key,
+        width: base.height,
+        height: base.width,
+        landscape: true
+      };
+    }
+
+    return {
+      key: base.key,
+      width: base.width,
+      height: base.height,
+      landscape: false
+    };
+  }
+
+  async function canvasToJpegBytes(canvas, quality = 0.94) {
+    const blob = await new Promise(resolve =>
+      canvas.toBlob(resolve, "image/jpeg", quality)
+    );
+    if (!blob) throw new Error("画像のPDF変換に失敗しました。");
+    return new Uint8Array(await blob.arrayBuffer());
+  }
+
+  async function addCanvasAsPaperPage(pdfDoc, canvas) {
+    const prepared = cropCanvasToVisibleContent(canvas);
+    const paper = getPaperSizeForCanvas(prepared);
+    const jpegBytes = await canvasToJpegBytes(prepared, 0.95);
+    const image = await pdfDoc.embedJpg(jpegBytes);
+
     const pageW = paper.width;
     const pageH = paper.height;
-    const margin = 18;
+    const margin = 12;
     const page = pdfDoc.addPage([pageW, pageH]);
 
     const maxW = pageW - margin * 2;
@@ -1255,6 +1404,57 @@
       width: w,
       height: h
     });
+  }
+
+  async function renderPdfPageForRebuild(pdfJsPage, correctionRotation) {
+    const dpi = Number($("rebuildDpi")?.value || 200);
+    const scale = Math.max(1, dpi / 72);
+
+    // PDF.js viewport already applies the source page's own /Rotate value.
+    const viewport = pdfJsPage.getViewport({ scale });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.ceil(viewport.width));
+    canvas.height = Math.max(1, Math.ceil(viewport.height));
+
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    await pdfJsPage.render({
+      canvasContext: ctx,
+      viewport,
+      background: "white"
+    }).promise;
+
+    const rotated = rotateCanvas(canvas, correctionRotation);
+    return cropCanvasToVisibleContent(rotated);
+  }
+
+  async function addImageAsPaperPage(pdfDoc, item, rotation) {
+    const url = URL.createObjectURL(item.file);
+
+    try {
+      const img = new Image();
+      img.decoding = "async";
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = url;
+      });
+
+      const source = document.createElement("canvas");
+      source.width = img.naturalWidth;
+      source.height = img.naturalHeight;
+      const ctx = source.getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, source.width, source.height);
+      ctx.drawImage(img, 0, 0);
+
+      const rotated = rotateCanvas(source, rotation);
+      await addCanvasAsPaperPage(pdfDoc, rotated);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   }
 
   function rotateCopiedPdfPages(pages, delta) {
@@ -1449,28 +1649,73 @@
         const pages = item.pages || [];
 
         if (isPdf) {
-          const srcBytes = await item.file.arrayBuffer();
-          const src = await PDFDocument.load(srcBytes, { ignoreEncryption: false });
+          const srcBytes = new Uint8Array(await item.file.arrayBuffer());
 
-          for (const pageState of pages) {
-            const excluded = isPageExcluded(pageState);
-            if (excluded) {
-              if (pageState.systemExclude && !pageState.keepOverride && !pageState.manualExclude) {
-                // Existing management cover: replaced by the newly generated cover.
-              } else if (pageState.isBlank && !pageState.manualExclude) {
-                removedBlankPages += 1;
-              } else {
-                manuallyExcludedPages += 1;
+          if ($("rebuildScanPdf")?.checked && window.pdfjsLib) {
+            const pdfJs = await window.pdfjsLib.getDocument({
+              data: srcBytes.slice()
+            }).promise;
+
+            try {
+              for (const pageState of pages) {
+                const excluded = isPageExcluded(pageState);
+                if (excluded) {
+                  if (pageState.systemExclude && !pageState.keepOverride && !pageState.manualExclude) {
+                    // Existing management cover: replaced by the newly generated cover.
+                  } else if (pageState.isBlank && !pageState.manualExclude) {
+                    removedBlankPages += 1;
+                  } else {
+                    manuallyExcludedPages += 1;
+                  }
+                  continue;
+                }
+
+                status.textContent =
+                  `${item.file.name}：ページ ${pageState.index + 1}/${pages.length} を用紙いっぱいに再構成中…`;
+
+                const pdfJsPage = await pdfJs.getPage(pageState.index + 1);
+                const correction = getPageFinalRotation(item, pageState);
+                const rebuiltCanvas = await renderPdfPageForRebuild(
+                  pdfJsPage,
+                  correction
+                );
+
+                await addCanvasAsPaperPage(out, rebuiltCanvas);
+                contentPagesAdded += 1;
+                pdfJsPage.cleanup();
               }
-              continue;
+            } finally {
+              try { await pdfJs.destroy(); } catch {}
             }
+          } else {
+            // Compatibility mode: preserve original PDF vectors/page boxes.
+            const src = await PDFDocument.load(
+              srcBytes,
+              { ignoreEncryption: false }
+            );
 
-            const [copied] = await out.copyPages(src, [pageState.index]);
-            const current = copied.getRotation().angle || 0;
-            const correction = getPageFinalRotation(item, pageState);
-            copied.setRotation(degrees(normalizedRotation(current + correction)));
-            out.addPage(copied);
-            contentPagesAdded += 1;
+            for (const pageState of pages) {
+              const excluded = isPageExcluded(pageState);
+              if (excluded) {
+                if (pageState.systemExclude && !pageState.keepOverride && !pageState.manualExclude) {
+                  // Existing management cover: replaced by the newly generated cover.
+                } else if (pageState.isBlank && !pageState.manualExclude) {
+                  removedBlankPages += 1;
+                } else {
+                  manuallyExcludedPages += 1;
+                }
+                continue;
+              }
+
+              const [copied] = await out.copyPages(src, [pageState.index]);
+              const current = copied.getRotation().angle || 0;
+              const correction = getPageFinalRotation(item, pageState);
+              copied.setRotation(
+                degrees(normalizedRotation(current + correction))
+              );
+              out.addPage(copied);
+              contentPagesAdded += 1;
+            }
           }
         } else if (pages[0]) {
           const pageState = pages[0];
@@ -1768,6 +2013,22 @@
   $("rotateSelectedLeft").addEventListener("click", () => rotateSelectedPages(-90));
   $("rotateSelectedRight").addEventListener("click", () => rotateSelectedPages(90));
   $("rotateSelected180").addEventListener("click", () => rotateSelectedPages(180));
+
+  $("rebuildScanPdf").addEventListener("change", () => {
+    const status = $("status");
+    status.className = "status";
+    status.textContent = $("rebuildScanPdf").checked
+      ? "スキャンPDF再構成：ON（余白を補正してB4/A4いっぱいに配置）"
+      : "スキャンPDF再構成：OFF（元PDFのページ構造を保持）";
+  });
+
+  $("autoCropMargins").addEventListener("change", () => {
+    const status = $("status");
+    status.className = "status";
+    status.textContent = $("autoCropMargins").checked
+      ? "白い余白の自動トリミング：ON"
+      : "白い余白の自動トリミング：OFF";
+  });
 
   $("imagePaperSize").addEventListener("change", () => {
     const status = $("status");

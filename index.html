@@ -136,15 +136,35 @@
 
       <div class="paper-size-box">
         <label>
-          <span>JPEG / PNGをPDF化する用紙サイズ</span>
+          <span>管理用の用紙サイズ</span>
           <select id="imagePaperSize">
             <option value="B4" selected>B4（JIS・おすすめ）</option>
             <option value="A4">A4</option>
           </select>
         </label>
+
+        <label class="checkbox-row rebuild-row">
+          <input id="rebuildScanPdf" type="checkbox" checked />
+          <span><strong>スキャンPDFも画像として再構成し、用紙いっぱいに補正する</strong></span>
+        </label>
+
+        <label class="checkbox-row rebuild-row">
+          <input id="autoCropMargins" type="checkbox" checked />
+          <span><strong>白い余白を自動トリミングする</strong></span>
+        </label>
+
+        <label class="quality-row">
+          <span>PDF再構成品質</span>
+          <select id="rebuildDpi">
+            <option value="200" selected>標準（約200dpi）</option>
+            <option value="300">高品質（約300dpi）</option>
+          </select>
+        </label>
+
         <small>
-          90° / 270°回転したページは、画像だけでなく用紙そのものも横向きにします。
-          既存PDFは元の用紙サイズを保持します。
+          90° / 270°回転時は、画像だけでなく用紙そのものも横向きにします。
+          V8以前などで「B4縦の中に小さな横画像」として保存されたPDFも、
+          余白を取り除いてB4横へ大きく再配置できます。
         </small>
       </div>
     </section>
