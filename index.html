@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF資料整理アプリ</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>PDF資料整理アプリ</h1>
+      <p>PDF・JPEG・PNGをまとめて、管理表紙を先頭に追加します。</p>
+    </div>
+    <button id="openSettings" class="secondary">プルダウン設定</button>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <h2>1. 資料を追加</h2>
+      <div id="dropZone" class="drop-zone">
+        <strong>PDF / JPEG / PNG をここへドラッグ</strong>
+        <span>または</span>
+        <label class="file-button">
+          ファイルを選択
+          <input id="fileInput" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" multiple />
+        </label>
+      </div>
+      <p class="hint">複数ファイルを選べます。PDFと画像の混在も可能です。下の一覧をドラッグして順番を変更できます。</p>
+
+      <div id="fileList" class="file-list empty">
+        <div class="empty-message">まだ資料が追加されていません。</div>
+      </div>
+      <div class="row-actions">
+        <button id="clearFiles" class="danger ghost">すべて削除</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2. 管理情報</h2>
+      <div class="form-grid">
+        <label>
+          <span>年度</span>
+          <select id="year"></select>
+        </label>
+        <label>
+          <span>学年</span>
+          <select id="grade"></select>
+        </label>
+        <label>
+          <span>科目</span>
+          <select id="subject"></select>
+        </label>
+        <label>
+          <span>テスト名</span>
+          <select id="testName"></select>
+        </label>
+        <label>
+          <span>学期</span>
+          <select id="term"></select>
+        </label>
+        <label>
+          <span>解答</span>
+          <select id="answer"></select>
+        </label>
+      </div>
+
+      <label class="checkbox-row">
+        <input id="addCover" type="checkbox" checked />
+        <span>管理表紙をPDFの1ページ目に追加する</span>
+      </label>
+    </section>
+
+    <section class="card output-card">
+      <h2>3. PDFを作成</h2>
+      <div class="filename-preview">
+        <span>保存ファイル名</span>
+        <strong id="filenamePreview">資料.pdf</strong>
+      </div>
+      <button id="buildPdf" class="primary big">PDFを作成して保存</button>
+      <div id="status" class="status"></div>
+      <p class="privacy">処理はブラウザ内で行います。PDFや画像をサーバーへ送信しません。</p>
+    </section>
+  </main>
+
+  <dialog id="settingsDialog">
+    <form method="dialog" class="settings-panel">
+      <div class="settings-header">
+        <div>
+          <h2>プルダウン設定</h2>
+          <p>項目の追加・編集・削除・並び替えができます。</p>
+        </div>
+        <button value="cancel" class="icon-button" aria-label="閉じる">×</button>
+      </div>
+
+      <div class="settings-toolbar">
+        <label>
+          編集する項目
+          <select id="settingsCategory">
+            <option value="year">年度</option>
+            <option value="grade">学年</option>
+            <option value="subject">科目</option>
+            <option value="testName">テスト名</option>
+            <option value="term">学期</option>
+            <option value="answer">解答</option>
+          </select>
+        </label>
+        <button type="button" id="addOption" class="secondary">＋ 項目追加</button>
+      </div>
+
+      <div id="optionEditor" class="option-editor"></div>
+
+      <div class="settings-footer">
+        <div class="settings-secondary-actions">
+          <button type="button" id="exportSettings" class="ghost">設定を書き出す</button>
+          <label class="ghost file-import-label">
+            設定を読み込む
+            <input id="importSettings" type="file" accept="application/json,.json" />
+          </label>
+          <button type="button" id="resetSettings" class="danger ghost">初期値に戻す</button>
+        </div>
+        <div>
+          <button type="button" id="saveSettings" class="primary">設定を保存</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
