@@ -81,10 +81,16 @@
         <div>
           <span class="sub-label">保存先</span>
           <strong id="folderName">通常のダウンロード先</strong>
-          <small id="folderHelp">GitHub PagesをEdge / Chromeで開くと、Y:\AIスキャンなどのフォルダを選択して直接保存できます。</small>
+          <small id="folderHelp">Edge / ChromeでGitHub Pages版を開くと、Y:\AIスキャンなどのフォルダを選択して直接保存できます。</small>
+          <small id="browserSupport" class="support-note"></small>
         </div>
         <button id="chooseFolder" class="secondary">保存先フォルダを選択</button>
       </div>
+
+      <label class="checkbox-row">
+        <input id="askSaveLocation" type="checkbox" />
+        <span>フォルダ直接保存が使えない場合、PDF作成時に保存場所を選ぶ</span>
+      </label>
 
       <div class="filename-preview">
         <span>管理番号（自動発行）</span>

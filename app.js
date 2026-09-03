@@ -432,29 +432,44 @@
   async function chooseOutputFolder() {
     const status = $("status");
 
-    if (!("showDirectoryPicker" in window)) {
-      status.className = "status error";
-      status.textContent = "このブラウザでは保存先フォルダの直接指定に対応していません。Edge / ChromeのGitHub Pages版で利用してください。";
-      return;
-    }
+    if ("showDirectoryPicker" in window) {
+      try {
+        outputDirectoryHandle = await window.showDirectoryPicker({
+          id: "ai-scan-output",
+          mode: "readwrite"
+        });
 
-    try {
-      outputDirectoryHandle = await window.showDirectoryPicker({
-        id: "ai-scan-output",
-        mode: "readwrite"
-      });
+        $("folderName").textContent = outputDirectoryHandle.name;
+        $("folderHelp").textContent =
+          "このフォルダへ直接PDFを保存します。Y:\AIスキャンを選んだ場合は、そのフォルダ内に保存されます。";
 
-      $("folderName").textContent = outputDirectoryHandle.name;
-      $("folderHelp").textContent = "このフォルダへ直接PDFを保存します。Y:\\AIスキャンを選んだ場合は、そのフォルダ内に保存されます。";
-      status.className = "status ok";
-      status.textContent = `保存先「${outputDirectoryHandle.name}」を選択しました。`;
-    } catch (err) {
-      if (err?.name !== "AbortError") {
+        status.className = "status ok";
+        status.textContent = `保存先「${outputDirectoryHandle.name}」を選択しました。`;
+        return;
+      } catch (err) {
+        if (err?.name === "AbortError") return;
+
         console.error(err);
         status.className = "status error";
-        status.textContent = "保存先フォルダを選択できませんでした。";
+        status.textContent =
+          "フォルダ選択がブラウザにブロックされました。GitHub PagesをEdge/Chromeで開いているか確認してください。";
+        return;
       }
     }
+
+    // Unsupported: don't disable the button; explain and offer fallback.
+    const isSecure = window.isSecureContext;
+    status.className = "status error";
+
+    if (!isSecure) {
+      status.textContent =
+        "このページは安全な接続(HTTPS)で開かれていないため、フォルダを直接選べません。GitHub Pages版をEdge/Chromeで開いてください。";
+    } else {
+      status.textContent =
+        "このブラウザはフォルダ直接保存に対応していません。「PDF作成時に保存場所を選ぶ」をONにするか、Edge/Chromeで開いてください。";
+    }
+
+    $("askSaveLocation").checked = true;
   }
 
   async function savePdfBytes(pdfBytes, filename) {
@@ -472,10 +487,35 @@
 
         return { mode: "folder", folder: outputDirectoryHandle.name };
       } catch (err) {
-        console.warn("Direct folder save failed. Falling back to download.", err);
+        console.warn("Direct folder save failed.", err);
       }
     }
 
+    // Fallback: ask the user to choose a file location each time.
+    if ($("askSaveLocation").checked && "showSaveFilePicker" in window) {
+      try {
+        const handle = await window.showSaveFilePicker({
+          id: "ai-scan-pdf-save",
+          suggestedName: filename,
+          types: [{
+            description: "PDF",
+            accept: { "application/pdf": [".pdf"] }
+          }]
+        });
+
+        const writable = await handle.createWritable();
+        await writable.write(pdfBytes);
+        await writable.close();
+        return { mode: "filepicker" };
+      } catch (err) {
+        if (err?.name === "AbortError") {
+          throw new Error("保存がキャンセルされました。");
+        }
+        console.warn("Save file picker failed; falling back to download.", err);
+      }
+    }
+
+    // Universal fallback: normal browser download.
     const blob = new Blob([pdfBytes], { type: "application/pdf" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -556,6 +596,8 @@
       status.className = "status ok";
       if (result.mode === "folder") {
         status.textContent = `「${result.folder}」に ${filename} を保存しました。元ファイルは変更されていません。`;
+      } else if (result.mode === "filepicker") {
+        status.textContent = `${filename} を選択した場所へ保存しました。元ファイルは変更されていません。`;
       } else {
         status.textContent = "PDFを作成しました。通常のダウンロード先へ保存しました。元ファイルは変更されていません。";
       }
@@ -748,11 +790,23 @@
 
   selectors.forEach(id => $(id).addEventListener("change", updateFilenamePreview));
 
-  if (!("showDirectoryPicker" in window)) {
-    $("chooseFolder").disabled = true;
-    $("chooseFolder").title = "Edge / ChromeのHTTPS版（GitHub Pages等）で利用できます。";
+  function updateBrowserSupportMessage() {
+    const el = $("browserSupport");
+
+    if ("showDirectoryPicker" in window && window.isSecureContext) {
+      el.textContent = "この環境ではフォルダ直接保存を利用できます。";
+      el.className = "support-note good";
+    } else if (!window.isSecureContext) {
+      el.textContent = "現在はHTTPSではないため、フォルダ直接保存は使えません。GitHub Pages版で利用してください。";
+      el.className = "support-note warn";
+    } else {
+      el.textContent = "このブラウザではフォルダ直接保存に未対応です。Edge/Chromeをおすすめします。";
+      el.className = "support-note warn";
+    }
   }
 
+  // The button is deliberately kept enabled so the user always gets an explanation.
+  updateBrowserSupportMessage();
   populateSelects();
   renderFiles();
 })();
