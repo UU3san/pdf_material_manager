@@ -1,5 +1,5 @@
 (() => {
-  const { PDFDocument } = PDFLib;
+  const { PDFDocument, degrees } = PDFLib;
 
   const DEFAULTS = {
     year: ["2026年度","2025年度","2024年度","2023年度","2022年度","2021年度","2020年度","2019年度","2018年度","不明"],
@@ -18,6 +18,7 @@
   let settings = loadSettings();
   let editSettings = structuredClone(settings);
   let files = [];
+  let outputDirectoryHandle = null;
 
   const $ = (id) => document.getElementById(id);
   const selectors = ["year","grade","subject","testName","term","answer"];
@@ -47,11 +48,11 @@
       sel.innerHTML = "";
       settings[key].forEach(v => {
         const opt = document.createElement("option");
-        opt.value = v; opt.textContent = v;
+        opt.value = v;
+        opt.textContent = v;
         sel.appendChild(opt);
       });
       if (settings[key].includes(current)) sel.value = current;
-      sel.addEventListener("change", updateFilenamePreview);
     });
     updateFilenamePreview();
   }
@@ -68,26 +69,48 @@
     return "JPEG";
   }
 
+  function normalizedRotation(value) {
+    return ((value % 360) + 360) % 360;
+  }
+
   function addFiles(fileList) {
     const accepted = Array.from(fileList).filter(f =>
       /application\/pdf|image\/jpeg|image\/png/.test(f.type) ||
       /\.(pdf|jpe?g|png)$/i.test(f.name)
     );
+
     files.push(...accepted.map(file => ({
       id: crypto.randomUUID(),
-      file
+      file,
+      rotation: 0
     })));
+
+    renderFiles();
+  }
+
+  function openOriginal(item) {
+    const url = URL.createObjectURL(item.file);
+    window.open(url, "_blank", "noopener");
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+
+  function rotateItem(id, delta) {
+    const item = files.find(x => x.id === id);
+    if (!item) return;
+    item.rotation = normalizedRotation(item.rotation + delta);
     renderFiles();
   }
 
   function renderFiles() {
     const list = $("fileList");
     list.innerHTML = "";
+
     if (!files.length) {
       list.classList.add("empty");
       list.innerHTML = '<div class="empty-message">まだ資料が追加されていません。</div>';
       return;
     }
+
     list.classList.remove("empty");
 
     files.forEach(item => {
@@ -100,6 +123,9 @@
       handle.className = "drag-handle";
       handle.textContent = "☰";
 
+      const info = document.createElement("div");
+      info.className = "file-info";
+
       const name = document.createElement("div");
       name.className = "file-name";
       name.textContent = item.file.name;
@@ -108,16 +134,46 @@
       meta.className = "file-meta";
       meta.textContent = `${typeLabel(item.file)} / ${humanSize(item.file.size)}`;
 
+      const rotation = document.createElement("span");
+      rotation.className = "rotation-badge";
+      rotation.textContent = item.rotation === 0 ? "回転なし" : `回転 ${item.rotation}°`;
+      meta.appendChild(rotation);
+
+      info.append(name, meta);
+
+      const actions = document.createElement("div");
+      actions.className = "file-actions";
+
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "small-button open-button";
+      open.textContent = "開いて確認";
+      open.addEventListener("click", () => openOriginal(item));
+
+      const left = document.createElement("button");
+      left.type = "button";
+      left.className = "small-button rotate-button";
+      left.textContent = "↶ 左90°";
+      left.addEventListener("click", () => rotateItem(item.id, -90));
+
+      const right = document.createElement("button");
+      right.type = "button";
+      right.className = "small-button rotate-button";
+      right.textContent = "↷ 右90°";
+      right.addEventListener("click", () => rotateItem(item.id, 90));
+
       const del = document.createElement("button");
       del.type = "button";
-      del.className = "small-button";
+      del.className = "small-button danger";
       del.textContent = "削除";
       del.addEventListener("click", () => {
         files = files.filter(x => x.id !== item.id);
         renderFiles();
       });
 
-      row.append(handle, name, meta, del);
+      actions.append(open, left, right, del);
+
+      row.append(handle, info, actions);
       attachDragEvents(row);
       list.appendChild(row);
     });
@@ -129,7 +185,9 @@
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/plain", row.dataset.id);
     });
+
     row.addEventListener("dragend", () => row.classList.remove("dragging"));
+
     row.addEventListener("dragover", e => {
       e.preventDefault();
       const dragging = document.querySelector(".file-item.dragging");
@@ -138,6 +196,7 @@
       const after = e.clientY > rect.top + rect.height / 2;
       row.parentNode.insertBefore(dragging, after ? row.nextSibling : row);
     });
+
     row.addEventListener("drop", e => {
       e.preventDefault();
       const ids = Array.from(document.querySelectorAll(".file-item")).map(el => el.dataset.id);
@@ -165,6 +224,7 @@
     const canvas = document.createElement("canvas");
     canvas.width = 1240;
     canvas.height = 1754;
+
     const ctx = canvas.getContext("2d");
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -190,8 +250,10 @@
     ctx.textAlign = "left";
     const startY = 330;
     const rowH = 145;
+
     rows.forEach((r, i) => {
       const y = startY + i * rowH;
+
       if (i > 0) {
         ctx.strokeStyle = "#d1d5db";
         ctx.lineWidth = 2;
@@ -206,15 +268,16 @@
       ctx.fillText(r[0], 175, y);
 
       ctx.fillStyle = "#111827";
-      ctx.font = 'bold 46px -apple-system, BlinkMacSystemFont, "Yu Gothic", Meiryo, sans-serif';
       fitText(ctx, r[1], 430, y, 620, 46, 28);
     });
 
     ctx.fillStyle = "#6b7280";
     ctx.textAlign = "center";
     ctx.font = '28px -apple-system, BlinkMacSystemFont, "Yu Gothic", Meiryo, sans-serif';
+
     const d = new Date();
     ctx.fillText(`登録日：${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`, canvas.width/2, 1390);
+
     ctx.font = '24px -apple-system, BlinkMacSystemFont, "Yu Gothic", Meiryo, sans-serif';
     ctx.fillText("このページは資料整理用に自動生成されました。", canvas.width/2, 1460);
 
@@ -232,21 +295,84 @@
     ctx.fillText(text, x, y, maxWidth);
   }
 
-  async function addImageAsA4(pdfDoc, file) {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    let image;
-    const isPng = file.type === "image/png" || file.name.toLowerCase().endsWith(".png");
-    if (isPng) image = await pdfDoc.embedPng(bytes);
-    else image = await pdfDoc.embedJpg(bytes);
+  async function loadImageFromFile(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const image = new Image();
+      image.decoding = "async";
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = reject;
+        image.src = url;
+      });
+      return image;
+    } finally {
+      // revoke is done after canvas draw in rotateImageFile()
+    }
+  }
 
-    const pageW = 595.28, pageH = 841.89;
+  async function rotateImageFile(file, rotation) {
+    const normalized = normalizedRotation(rotation);
+
+    if (normalized === 0) {
+      return {
+        bytes: new Uint8Array(await file.arrayBuffer()),
+        kind: (file.type === "image/png" || file.name.toLowerCase().endsWith(".png")) ? "png" : "jpg"
+      };
+    }
+
+    const url = URL.createObjectURL(file);
+
+    try {
+      const image = new Image();
+      image.decoding = "async";
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = reject;
+        image.src = url;
+      });
+
+      const swap = normalized === 90 || normalized === 270;
+      const canvas = document.createElement("canvas");
+      canvas.width = swap ? image.naturalHeight : image.naturalWidth;
+      canvas.height = swap ? image.naturalWidth : image.naturalHeight;
+
+      const ctx = canvas.getContext("2d");
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(normalized * Math.PI / 180);
+      ctx.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
+
+      const isPng = file.type === "image/png" || file.name.toLowerCase().endsWith(".png");
+      const mime = isPng ? "image/png" : "image/jpeg";
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, mime, isPng ? undefined : 0.94));
+
+      return {
+        bytes: new Uint8Array(await blob.arrayBuffer()),
+        kind: isPng ? "png" : "jpg"
+      };
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function addImageAsA4(pdfDoc, item) {
+    const rotated = await rotateImageFile(item.file, item.rotation);
+    let image;
+
+    if (rotated.kind === "png") image = await pdfDoc.embedPng(rotated.bytes);
+    else image = await pdfDoc.embedJpg(rotated.bytes);
+
+    const pageW = 595.28;
+    const pageH = 841.89;
     const margin = 24;
     const page = pdfDoc.addPage([pageW, pageH]);
+
     const maxW = pageW - margin * 2;
     const maxH = pageH - margin * 2;
     const scale = Math.min(maxW / image.width, maxH / image.height);
     const w = image.width * scale;
     const h = image.height * scale;
+
     page.drawImage(image, {
       x: (pageW - w) / 2,
       y: (pageH - h) / 2,
@@ -255,8 +381,79 @@
     });
   }
 
+  function rotateCopiedPdfPages(pages, delta) {
+    const normalized = normalizedRotation(delta);
+    if (normalized === 0) return;
+
+    pages.forEach(page => {
+      const current = page.getRotation().angle || 0;
+      page.setRotation(degrees(normalizedRotation(current + normalized)));
+    });
+  }
+
+  async function chooseOutputFolder() {
+    const status = $("status");
+
+    if (!("showDirectoryPicker" in window)) {
+      status.className = "status error";
+      status.textContent = "このブラウザでは保存先フォルダの直接指定に対応していません。Edge / ChromeのGitHub Pages版で利用してください。";
+      return;
+    }
+
+    try {
+      outputDirectoryHandle = await window.showDirectoryPicker({
+        id: "ai-scan-output",
+        mode: "readwrite"
+      });
+
+      $("folderName").textContent = outputDirectoryHandle.name;
+      $("folderHelp").textContent = "このフォルダへ直接PDFを保存します。Y:\\AIスキャンを選んだ場合は、そのフォルダ内に保存されます。";
+      status.className = "status ok";
+      status.textContent = `保存先「${outputDirectoryHandle.name}」を選択しました。`;
+    } catch (err) {
+      if (err?.name !== "AbortError") {
+        console.error(err);
+        status.className = "status error";
+        status.textContent = "保存先フォルダを選択できませんでした。";
+      }
+    }
+  }
+
+  async function savePdfBytes(pdfBytes, filename) {
+    if (outputDirectoryHandle) {
+      try {
+        if (outputDirectoryHandle.requestPermission) {
+          const permission = await outputDirectoryHandle.requestPermission({ mode: "readwrite" });
+          if (permission !== "granted") throw new Error("write permission not granted");
+        }
+
+        const fileHandle = await outputDirectoryHandle.getFileHandle(filename, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(pdfBytes);
+        await writable.close();
+
+        return { mode: "folder", folder: outputDirectoryHandle.name };
+      } catch (err) {
+        console.warn("Direct folder save failed. Falling back to download.", err);
+      }
+    }
+
+    const blob = new Blob([pdfBytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+    return { mode: "download" };
+  }
+
   async function buildPdf() {
     const status = $("status");
+
     if (!files.length && !$("addCover").checked) {
       status.className = "status error";
       status.textContent = "PDFまたは画像を1つ以上追加してください。";
@@ -280,7 +477,9 @@
         status.textContent = "管理表紙を作成しています…";
         const coverPng = await createCoverPng();
         const coverImg = await out.embedPng(coverPng);
-        const pageW = 595.28, pageH = 841.89;
+
+        const pageW = 595.28;
+        const pageH = 841.89;
         const page = out.addPage([pageW, pageH]);
         page.drawImage(coverImg, { x: 0, y: 0, width: pageW, height: pageH });
       }
@@ -289,33 +488,40 @@
         const item = files[i];
         status.textContent = `${i+1}/${files.length}：${item.file.name} を処理中…`;
 
-        const isPdf = item.file.type === "application/pdf" || item.file.name.toLowerCase().endsWith(".pdf");
+        const isPdf =
+          item.file.type === "application/pdf" ||
+          item.file.name.toLowerCase().endsWith(".pdf");
+
         if (isPdf) {
-          const src = await PDFDocument.load(await item.file.arrayBuffer(), { ignoreEncryption: false });
+          const src = await PDFDocument.load(
+            await item.file.arrayBuffer(),
+            { ignoreEncryption: false }
+          );
+
           const copied = await out.copyPages(src, src.getPageIndices());
+          rotateCopiedPdfPages(copied, item.rotation);
           copied.forEach(p => out.addPage(p));
         } else {
-          await addImageAsA4(out, item.file);
+          await addImageAsA4(out, item);
         }
       }
 
       status.textContent = "保存用PDFを仕上げています…";
       const pdfBytes = await out.save();
-      const blob = new Blob([pdfBytes], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = buildFilename();
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      const filename = buildFilename();
+
+      const result = await savePdfBytes(pdfBytes, filename);
 
       status.className = "status ok";
-      status.textContent = "PDFを作成しました。元ファイルは変更されていません。";
+      if (result.mode === "folder") {
+        status.textContent = `「${result.folder}」に ${filename} を保存しました。元ファイルは変更されていません。`;
+      } else {
+        status.textContent = "PDFを作成しました。通常のダウンロード先へ保存しました。元ファイルは変更されていません。";
+      }
     } catch (err) {
       console.error(err);
       status.className = "status error";
+
       if (/encrypted/i.test(String(err))) {
         status.textContent = "パスワード保護されたPDFは処理できません。保護を解除したPDFを使用してください。";
       } else {
@@ -331,6 +537,7 @@
     const key = $("settingsCategory").value;
     const box = $("optionEditor");
     box.innerHTML = "";
+
     editSettings[key].forEach((value, idx) => {
       const row = document.createElement("div");
       row.className = "option-row";
@@ -373,7 +580,9 @@
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/plain", row.dataset.index);
     });
+
     row.addEventListener("dragend", () => row.classList.remove("dragging"));
+
     row.addEventListener("dragover", e => {
       e.preventDefault();
       const dragging = document.querySelector(".option-row.dragging");
@@ -382,14 +591,11 @@
       const after = e.clientY > rect.top + rect.height/2;
       row.parentNode.insertBefore(dragging, after ? row.nextSibling : row);
     });
+
     row.addEventListener("drop", e => {
       e.preventDefault();
       const rows = Array.from(document.querySelectorAll(".option-row"));
-      const newValues = rows.map(el => {
-        const inp = el.querySelector("input");
-        return inp.value;
-      });
-      editSettings[key] = newValues;
+      editSettings[key] = rows.map(el => el.querySelector("input").value);
       renderOptionEditor();
     });
   }
@@ -415,6 +621,7 @@
       editSettings[key] = editSettings[key].map(v => v.trim()).filter(Boolean);
       if (!editSettings[key].length) editSettings[key] = [...DEFAULTS[key]];
     }
+
     settings = structuredClone(editSettings);
     saveLocalSettings();
     populateSelects();
@@ -428,22 +635,34 @@
   });
 
   $("exportSettings").addEventListener("click", () => {
-    const blob = new Blob([JSON.stringify(editSettings, null, 2)], {type:"application/json"});
+    const blob = new Blob(
+      [JSON.stringify(editSettings, null, 2)],
+      { type: "application/json" }
+    );
+
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = "pdf-app-settings.json";
-    document.body.appendChild(a); a.click(); a.remove();
+    a.href = url;
+    a.download = "pdf-app-settings.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   });
 
   $("importSettings").addEventListener("change", async e => {
     const file = e.target.files?.[0];
     if (!file) return;
+
     try {
       const parsed = JSON.parse(await file.text());
+
       for (const key of Object.keys(DEFAULTS)) {
-        if (!Array.isArray(parsed[key]) || !parsed[key].length) throw new Error("invalid");
+        if (!Array.isArray(parsed[key]) || !parsed[key].length) {
+          throw new Error("invalid");
+        }
       }
+
       editSettings = parsed;
       renderOptionEditor();
       alert("設定を読み込みました。「設定を保存」を押すと反映されます。");
@@ -461,25 +680,37 @@
   });
 
   const dz = $("dropZone");
+
   ["dragenter","dragover"].forEach(evt => dz.addEventListener(evt, e => {
-    e.preventDefault(); dz.classList.add("dragover");
+    e.preventDefault();
+    dz.classList.add("dragover");
   }));
+
   ["dragleave","drop"].forEach(evt => dz.addEventListener(evt, e => {
-    e.preventDefault(); dz.classList.remove("dragover");
+    e.preventDefault();
+    dz.classList.remove("dragover");
   }));
+
   dz.addEventListener("drop", e => addFiles(e.dataTransfer.files));
 
   $("clearFiles").addEventListener("click", () => {
     if (!files.length) return;
+
     if (confirm("追加したファイルをすべて一覧から削除しますか？")) {
       files = [];
       renderFiles();
     }
   });
 
+  $("chooseFolder").addEventListener("click", chooseOutputFolder);
   $("buildPdf").addEventListener("click", buildPdf);
 
   selectors.forEach(id => $(id).addEventListener("change", updateFilenamePreview));
+
+  if (!("showDirectoryPicker" in window)) {
+    $("chooseFolder").disabled = true;
+    $("chooseFolder").title = "Edge / ChromeのHTTPS版（GitHub Pages等）で利用できます。";
+  }
 
   populateSelects();
   renderFiles();

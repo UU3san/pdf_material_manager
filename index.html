@@ -10,14 +10,14 @@
   <header class="app-header">
     <div>
       <h1>PDF資料整理アプリ</h1>
-      <p>PDF・JPEG・PNGをまとめて、管理表紙を先頭に追加します。</p>
+      <p>PDF・JPEG・PNGをまとめて、向きを整え、管理表紙を付けてPDF保存します。</p>
     </div>
     <button id="openSettings" class="secondary">プルダウン設定</button>
   </header>
 
   <main class="container">
     <section class="card">
-      <h2>1. 資料を追加</h2>
+      <h2>1. 資料を追加・向きを確認</h2>
       <div id="dropZone" class="drop-zone">
         <strong>PDF / JPEG / PNG をここへドラッグ</strong>
         <span>または</span>
@@ -26,7 +26,10 @@
           <input id="fileInput" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" multiple />
         </label>
       </div>
-      <p class="hint">複数ファイルを選べます。PDFと画像の混在も可能です。下の一覧をドラッグして順番を変更できます。</p>
+      <p class="hint">
+        PDFと画像の混在も可能です。下の一覧をドラッグして順番変更できます。
+        「左90°」「右90°」で、その資料全体の向きを修正してからPDF化できます。
+      </p>
 
       <div id="fileList" class="file-list empty">
         <div class="empty-message">まだ資料が追加されていません。</div>
@@ -72,14 +75,28 @@
     </section>
 
     <section class="card output-card">
-      <h2>3. PDFを作成</h2>
+      <h2>3. PDFを保存</h2>
+
+      <div class="save-destination">
+        <div>
+          <span class="sub-label">保存先</span>
+          <strong id="folderName">通常のダウンロード先</strong>
+          <small id="folderHelp">GitHub PagesをEdge / Chromeで開くと、Y:\AIスキャンなどのフォルダを選択して直接保存できます。</small>
+        </div>
+        <button id="chooseFolder" class="secondary">保存先フォルダを選択</button>
+      </div>
+
       <div class="filename-preview">
         <span>保存ファイル名</span>
         <strong id="filenamePreview">資料.pdf</strong>
       </div>
+
       <button id="buildPdf" class="primary big">PDFを作成して保存</button>
       <div id="status" class="status"></div>
-      <p class="privacy">処理はブラウザ内で行います。PDFや画像をサーバーへ送信しません。</p>
+      <p class="privacy">
+        PDF・画像の処理はブラウザ内で行います。元ファイルは変更しません。
+        保存先フォルダを選ばない場合は、通常のダウンロードとして保存します。
+      </p>
     </section>
   </main>
 
