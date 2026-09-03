@@ -27,6 +27,8 @@
   let analysisQueue = Promise.resolve();
   let osdWorkerPromise = null;
   let analysisRunning = false;
+  let currentDocumentId = null;
+  let editingExistingManagedPdf = false;
 
   const $ = (id) => document.getElementById(id);
   const selectors = ["year","grade","subject","testName","term","answer"];
@@ -49,18 +51,45 @@
     localStorage.setItem("pdfMaterialManagerSettings", JSON.stringify(settings));
   }
 
-  function populateSelects() {
+  function ensureSelectValue(key, value) {
+    if (!value) return;
+    if (!settings[key].includes(value)) {
+      settings[key].push(value);
+      saveLocalSettings();
+    }
+  }
+
+  function populateSelects(preserveCurrent = true) {
     selectors.forEach(key => {
       const sel = $(key);
-      const current = sel.value;
+      const current = preserveCurrent ? sel.value : "";
+
       sel.innerHTML = "";
+
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "— 未選択 —";
+      sel.appendChild(placeholder);
+
       settings[key].forEach(v => {
         const opt = document.createElement("option");
         opt.value = v;
         opt.textContent = v;
         sel.appendChild(opt);
       });
-      if (settings[key].includes(current)) sel.value = current;
+
+      if (!settings[key].includes("混在")) {
+        const mixed = document.createElement("option");
+        mixed.value = "混在";
+        mixed.textContent = "混在";
+        sel.appendChild(mixed);
+      }
+
+      if (current && Array.from(sel.options).some(o => o.value === current)) {
+        sel.value = current;
+      } else {
+        sel.value = "";
+      }
     });
     updateFilenamePreview();
   }
@@ -81,23 +110,135 @@
     return ((value % 360) + 360) % 360;
   }
 
-  function addFiles(fileList) {
+  async function parseManagedPdfMetadata(file) {
+    try {
+      const bytes = await file.arrayBuffer();
+      const pdf = await PDFDocument.load(bytes, { ignoreEncryption: false });
+      const subject = pdf.getSubject?.() || "";
+
+      if (!subject.startsWith("AI_SCAN_MANAGER_V8|")) return null;
+
+      const payload = subject.slice("AI_SCAN_MANAGER_V8|".length);
+      const parsed = JSON.parse(decodeURIComponent(payload));
+
+      if (!parsed?.documentId) return null;
+      return {
+        documentId: parsed.documentId,
+        metadata: parsed.metadata || {}
+      };
+    } catch (err) {
+      console.warn("Managed PDF metadata could not be read.", err);
+      return null;
+    }
+  }
+
+  function parseManagedFilename(filename) {
+    const base = String(filename || "").replace(/\.pdf$/i, "");
+    const match = /^(\d{8}-\d{3})_(.+)$/.exec(base);
+    if (!match) return null;
+
+    const documentId = match[1];
+    const parts = match[2].split("_");
+
+    const metadata = {};
+    const keys = ["year","grade","subject","testName","term","answer"];
+    keys.forEach((key, i) => {
+      if (parts[i]) metadata[key] = parts[i];
+    });
+
+    return { documentId, metadata };
+  }
+
+  function applyManagedMetadata(parsed) {
+    if (!parsed) return;
+
+    currentDocumentId = parsed.documentId;
+    editingExistingManagedPdf = true;
+
+    Object.entries(parsed.metadata || {}).forEach(([key, value]) => {
+      if (!selectors.includes(key) || !value) return;
+      ensureSelectValue(key, value);
+    });
+
+    populateSelects(false);
+
+    Object.entries(parsed.metadata || {}).forEach(([key, value]) => {
+      const sel = $(key);
+      if (sel && Array.from(sel.options).some(o => o.value === value)) {
+        sel.value = value;
+      }
+    });
+
+    updateEditModeNotice();
+    updateFilenamePreview();
+  }
+
+  function resetEditMode() {
+    currentDocumentId = null;
+    editingExistingManagedPdf = false;
+    // The old management cover remains excluded; only the management number changes.
+    updateEditModeNotice();
+    updateFilenamePreview();
+    renderPagePreviews();
+  }
+
+  function updateEditModeNotice() {
+    const box = $("editModeNotice");
+    const text = $("editModeText");
+    if (!box || !text) return;
+
+    if (editingExistingManagedPdf && currentDocumentId) {
+      box.hidden = false;
+      text.textContent = `管理番号 ${currentDocumentId} を引き継ぎます。1ページ目は旧管理表紙として除外予定です。サムネイルから復活できます。`;
+    } else {
+      box.hidden = true;
+      text.textContent = "";
+    }
+  }
+
+  async function addFiles(fileList) {
     const accepted = Array.from(fileList).filter(f =>
       /application\/pdf|image\/jpeg|image\/png/.test(f.type) ||
       /\.(pdf|jpe?g|png)$/i.test(f.name)
     );
 
-    const added = accepted.map(file => ({
+    const startingEmpty = files.length === 0;
+    let managedParsed = null;
+
+    if (startingEmpty && accepted.length === 1) {
+      const only = accepted[0];
+      const isPdf = only.type === "application/pdf" || only.name.toLowerCase().endsWith(".pdf");
+      if (isPdf) {
+        managedParsed =
+          await parseManagedPdfMetadata(only) ||
+          parseManagedFilename(only.name);
+      }
+    }
+
+    if (!managedParsed && startingEmpty) {
+      currentDocumentId = null;
+      editingExistingManagedPdf = false;
+      updateEditModeNotice();
+    }
+
+    const added = accepted.map((file, idx) => ({
       id: crypto.randomUUID(),
       file,
       rotation: 0,
       pages: [],
       analyzed: false,
       analyzing: false,
-      analysisError: null
+      analysisError: null,
+      managedDocument: Boolean(managedParsed && idx === 0),
+      skipExistingCover: Boolean(managedParsed && idx === 0)
     }));
 
     files.push(...added);
+
+    if (managedParsed) {
+      applyManagedMetadata(managedParsed);
+    }
+
     renderFiles();
     renderPagePreviews();
     queueAnalysis(added);
@@ -126,6 +267,7 @@
     if (!page) return false;
     if (page.manualExclude) return true;
     if (page.keepOverride) return false;
+    if (page.systemExclude) return true;
     return Boolean($("removeBlankPages").checked && page.isBlank);
   }
 
@@ -265,7 +407,20 @@
       item.pages.forEach(page => {
         const excluded = isPageExcluded(page);
         const card = document.createElement("div");
-        card.className = `page-card${excluded ? " excluded" : ""}${page.isBlank ? " blank-page" : ""}`;
+        card.className = `page-card${excluded ? " excluded" : ""}${page.isBlank ? " blank-page" : ""}${page.selected ? " selected" : ""}`;
+
+        const selectRow = document.createElement("label");
+        selectRow.className = "page-select-row";
+        const selectBox = document.createElement("input");
+        selectBox.type = "checkbox";
+        selectBox.checked = Boolean(page.selected);
+        selectBox.addEventListener("change", () => {
+          page.selected = selectBox.checked;
+          renderPagePreviews();
+        });
+        const selectText = document.createElement("span");
+        selectText.textContent = "一括編集に選択";
+        selectRow.append(selectBox, selectText);
 
         const frame = document.createElement("div");
         frame.className = "thumb-frame";
@@ -307,6 +462,13 @@
           conf.className = `page-badge ${page.orientationConfidence < 2 ? "warn" : ""}`;
           conf.textContent = `信頼 ${Number(page.orientationConfidence).toFixed(1)}`;
           badges.appendChild(conf);
+        }
+
+        if (page.systemExcludeReason) {
+          const sys = document.createElement("span");
+          sys.className = "page-badge system";
+          sys.textContent = page.systemExcludeReason;
+          badges.appendChild(sys);
         }
 
         if (page.isBlank) {
@@ -359,13 +521,49 @@
 
         controls.append(left, right, exclude);
         body.append(ptitle, badges, controls);
-        card.append(frame, body);
+        card.append(selectRow, frame, body);
         grid.appendChild(card);
       });
 
       group.appendChild(grid);
       box.appendChild(group);
     });
+  }
+
+  function allPages() {
+    return files.flatMap(item =>
+      (item.pages || []).map(page => ({ item, page }))
+    );
+  }
+
+  function selectedPages() {
+    return allPages().filter(({ page }) => page.selected);
+  }
+
+  function setAllPageSelection(selected) {
+    allPages().forEach(({ page }) => {
+      page.selected = selected;
+    });
+    renderPagePreviews();
+  }
+
+  function rotateSelectedPages(delta) {
+    const selected = selectedPages();
+    if (!selected.length) {
+      const status = $("status");
+      status.className = "status error";
+      status.textContent = "回転するページにチェックを付けてください。";
+      return;
+    }
+
+    selected.forEach(({ page }) => {
+      page.manualRotation = normalizedRotation(Number(page.manualRotation || 0) + delta);
+    });
+
+    renderPagePreviews();
+    const status = $("status");
+    status.className = "status ok";
+    status.textContent = `選択した ${selected.length}ページを ${Math.abs(delta)}° 回転しました。`;
   }
 
   function escapeHtml(value) {
@@ -525,6 +723,9 @@
           manualRotation: 0,
           manualExclude: false,
           keepOverride: false,
+          systemExclude: Boolean(item.skipExistingCover && pageNo === 1),
+          systemExcludeReason: item.skipExistingCover && pageNo === 1 ? "旧管理表紙" : null,
+          selected: false,
           analyzing: true
         };
         item.pages.push(pageState);
@@ -602,6 +803,9 @@
       manualRotation: 0,
       manualExclude: false,
       keepOverride: false,
+      systemExclude: false,
+      systemExcludeReason: null,
+      selected: false,
       analyzing: true
     };
     item.pages = [pageState];
@@ -680,15 +884,20 @@
       .slice(0, 50);
   }
 
-  function buildFilename(documentId = getPendingDocumentId()) {
+  function getActiveDocumentId() {
+    return currentDocumentId || getPendingDocumentId();
+  }
+
+  function buildFilename(documentId = getActiveDocumentId()) {
     const parts = selectors.map(id => safePart($(id).value)).filter(Boolean);
     const detail = parts.join("_") || "資料";
     return `${documentId}_${detail}.pdf`;
   }
 
   function updateFilenamePreview() {
-    const documentId = getPendingDocumentId();
-    $("documentIdPreview").textContent = documentId;
+    const documentId = getActiveDocumentId();
+    $("documentIdPreview").textContent =
+      editingExistingManagedPdf ? `${documentId}（再編集）` : documentId;
     $("filenamePreview").textContent = buildFilename(documentId);
   }
 
@@ -712,12 +921,12 @@
 
     const rows = [
       ["管理番号", documentId],
-      ["年度", $("year").value],
-      ["学年", $("grade").value],
-      ["科目", $("subject").value],
-      ["テスト名", $("testName").value],
-      ["学期", $("term").value],
-      ["解答", $("answer").value]
+      ["年度", $("year").value || "—"],
+      ["学年", $("grade").value || "—"],
+      ["科目", $("subject").value || "—"],
+      ["テスト名", $("testName").value || "—"],
+      ["学期", $("term").value || "—"],
+      ["解答", $("answer").value || "—"]
     ];
 
     ctx.textAlign = "left";
@@ -1157,8 +1366,25 @@
       await analysisQueue;
 
       status.textContent = "PDFを作成しています…";
-      const documentId = getPendingDocumentId();
+      const wasEditingExisting = editingExistingManagedPdf && Boolean(currentDocumentId);
+      const documentId = getActiveDocumentId();
       const out = await PDFDocument.create();
+
+      const embeddedMetadata = {
+        documentId,
+        metadata: Object.fromEntries(
+          selectors.map(id => [id, $(id).value || ""])
+        )
+      };
+
+      out.setTitle(buildFilename(documentId).replace(/\.pdf$/i, ""));
+      out.setSubject(
+        `AI_SCAN_MANAGER_V8|${encodeURIComponent(JSON.stringify(embeddedMetadata))}`
+      );
+      out.setKeywords([
+        "AI_SCAN_MANAGER_V8",
+        `documentId:${documentId}`
+      ]);
       let removedBlankPages = 0;
       let manuallyExcludedPages = 0;
       let contentPagesAdded = 0;
@@ -1191,8 +1417,13 @@
           for (const pageState of pages) {
             const excluded = isPageExcluded(pageState);
             if (excluded) {
-              if (pageState.isBlank && !pageState.manualExclude) removedBlankPages += 1;
-              else manuallyExcludedPages += 1;
+              if (pageState.systemExclude && !pageState.keepOverride && !pageState.manualExclude) {
+                // Existing management cover: replaced by the newly generated cover.
+              } else if (pageState.isBlank && !pageState.manualExclude) {
+                removedBlankPages += 1;
+              } else {
+                manuallyExcludedPages += 1;
+              }
               continue;
             }
 
@@ -1225,7 +1456,9 @@
       const filename = buildFilename(documentId);
 
       const result = await savePdfBytes(pdfBytes, filename);
-      commitDocumentId(documentId);
+      if (!wasEditingExisting) {
+        commitDocumentId(documentId);
+      }
       updateFilenamePreview();
 
       status.className = "status ok";
@@ -1260,6 +1493,32 @@
     } finally {
       $("buildPdf").disabled = false;
     }
+  }
+
+  function fillUnselectedWithMixed() {
+    let changed = 0;
+
+    selectors.forEach(key => {
+      const sel = $(key);
+      if (!sel.value) {
+        if (!Array.from(sel.options).some(o => o.value === "混在")) {
+          const opt = document.createElement("option");
+          opt.value = "混在";
+          opt.textContent = "混在";
+          sel.appendChild(opt);
+        }
+        sel.value = "混在";
+        changed += 1;
+      }
+    });
+
+    updateFilenamePreview();
+
+    const status = $("status");
+    status.className = "status ok";
+    status.textContent = changed
+      ? `未選択の ${changed}項目を「混在」にしました。`
+      : "すべての項目がすでに選択されています。";
   }
 
   // Settings UI
@@ -1428,6 +1687,10 @@
 
     if (confirm("追加したファイルをすべて一覧から削除しますか？")) {
       files = [];
+      currentDocumentId = null;
+      editingExistingManagedPdf = false;
+      updateEditModeNotice();
+      updateFilenamePreview();
       renderFiles();
       renderPagePreviews();
     }
@@ -1462,6 +1725,21 @@
 
   $("reanalyzePages").addEventListener("click", reanalyzeAllPages);
 
+  $("selectAllPages").addEventListener("click", () => setAllPageSelection(true));
+  $("clearPageSelection").addEventListener("click", () => setAllPageSelection(false));
+  $("rotateSelectedLeft").addEventListener("click", () => rotateSelectedPages(-90));
+  $("rotateSelectedRight").addEventListener("click", () => rotateSelectedPages(90));
+  $("rotateSelected180").addEventListener("click", () => rotateSelectedPages(180));
+
+  $("fillMixedFields").addEventListener("click", fillUnselectedWithMixed);
+
+  $("leaveEditMode").addEventListener("click", () => {
+    resetEditMode();
+    const status = $("status");
+    status.className = "status ok";
+    status.textContent = "新しい資料として扱います。保存時に新しい管理番号を発行します。";
+  });
+
   $("chooseFolder").addEventListener("click", chooseOutputFolder);
   $("buildPdf").addEventListener("click", buildPdf);
 
@@ -1484,7 +1762,8 @@
 
   // The button is deliberately kept enabled so the user always gets an explanation.
   updateBrowserSupportMessage();
-  populateSelects();
+  populateSelects(false);
+  updateEditModeNotice();
   renderFiles();
   renderPagePreviews();
 })();
