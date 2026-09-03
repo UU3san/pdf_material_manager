@@ -133,6 +133,20 @@
         <input id="addCover" type="checkbox" checked />
         <span>管理表紙をPDFの1ページ目に追加する</span>
       </label>
+
+      <div class="paper-size-box">
+        <label>
+          <span>JPEG / PNGをPDF化する用紙サイズ</span>
+          <select id="imagePaperSize">
+            <option value="B4" selected>B4（JIS・おすすめ）</option>
+            <option value="A4">A4</option>
+          </select>
+        </label>
+        <small>
+          90° / 270°回転したページは、画像だけでなく用紙そのものも横向きにします。
+          既存PDFは元の用紙サイズを保持します。
+        </small>
+      </div>
     </section>
 
     <section class="card output-card">

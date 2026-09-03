@@ -901,6 +901,38 @@
     $("filenamePreview").textContent = buildFilename(documentId);
   }
 
+  function getSelectedPaperSize() {
+    const key = $("imagePaperSize")?.value || "B4";
+
+    // PDF points. B4 is JIS B4: 257 x 364 mm.
+    if (key === "A4") {
+      return { key: "A4", width: 595.28, height: 841.89 };
+    }
+
+    return { key: "B4", width: 728.50, height: 1031.81 };
+  }
+
+  function getOrientedPaperSize(rotation) {
+    const base = getSelectedPaperSize();
+    const r = normalizedRotation(rotation);
+
+    if (r === 90 || r === 270) {
+      return {
+        key: base.key,
+        width: base.height,
+        height: base.width,
+        landscape: true
+      };
+    }
+
+    return {
+      key: base.key,
+      width: base.width,
+      height: base.height,
+      landscape: false
+    };
+  }
+
   async function createCoverPng(documentId) {
     const canvas = document.createElement("canvas");
     canvas.width = 1240;
@@ -1194,16 +1226,21 @@
     }
   }
 
-  async function addImageAsA4(pdfDoc, item, rotation) {
-    const rotated = await rotateImageFile(item.file, rotation);
+  async function addImageAsPaperPage(pdfDoc, item, rotation) {
+    const finalRotation = normalizedRotation(rotation);
+    const rotated = await rotateImageFile(item.file, finalRotation);
     let image;
 
     if (rotated.kind === "png") image = await pdfDoc.embedPng(rotated.bytes);
     else image = await pdfDoc.embedJpg(rotated.bytes);
 
-    const pageW = 595.28;
-    const pageH = 841.89;
-    const margin = 24;
+    // IMPORTANT:
+    // 90° / 270° means the PDF page box itself becomes landscape.
+    // This prevents a rotated B4 scan from being shrunk inside a portrait page.
+    const paper = getOrientedPaperSize(finalRotation);
+    const pageW = paper.width;
+    const pageH = paper.height;
+    const margin = 18;
     const page = pdfDoc.addPage([pageW, pageH]);
 
     const maxW = pageW - margin * 2;
@@ -1394,8 +1431,9 @@
         const coverPng = await createCoverPng(documentId);
         const coverImg = await out.embedPng(coverPng);
 
-        const pageW = 595.28;
-        const pageH = 841.89;
+        const coverPaper = getSelectedPaperSize();
+        const pageW = coverPaper.width;
+        const pageH = coverPaper.height;
         const page = out.addPage([pageW, pageH]);
         page.drawImage(coverImg, { x: 0, y: 0, width: pageW, height: pageH });
       }
@@ -1441,7 +1479,7 @@
             if (pageState.isBlank && !pageState.manualExclude) removedBlankPages += 1;
             else manuallyExcludedPages += 1;
           } else {
-            await addImageAsA4(out, item, getPageFinalRotation(item, pageState));
+            await addImageAsPaperPage(out, item, getPageFinalRotation(item, pageState));
             contentPagesAdded += 1;
           }
         }
@@ -1730,6 +1768,13 @@
   $("rotateSelectedLeft").addEventListener("click", () => rotateSelectedPages(-90));
   $("rotateSelectedRight").addEventListener("click", () => rotateSelectedPages(90));
   $("rotateSelected180").addEventListener("click", () => rotateSelectedPages(180));
+
+  $("imagePaperSize").addEventListener("change", () => {
+    const status = $("status");
+    status.className = "status";
+    status.textContent =
+      `画像PDF用紙サイズ：${$("imagePaperSize").value}。90°/270°回転時は用紙も横向きになります。`;
+  });
 
   $("fillMixedFields").addEventListener("click", fillUnselectedWithMixed);
 
