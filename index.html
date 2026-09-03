@@ -27,20 +27,50 @@
         </label>
       </div>
       <p class="hint">
-        PDFと画像の混在も可能です。下の一覧をドラッグして順番変更できます。
-        横向きページは自動で縦向きにそろえます。必要な場合は「左90°」「右90°」で微調整できます。
+        PDFと画像の混在も可能です。文字の向きを解析して、0° / 90° / 180° / 270°を自動判定します。
+        逆さまも判定し、各ページのサムネイルを見ながら手動で微調整できます。
       </p>
 
       <label class="checkbox-row auto-orient-box">
         <input id="autoOrient" type="checkbox" checked />
-        <span><strong>横向きのページを自動で縦向きにする</strong></span>
+        <span><strong>文字の向きを自動判定する（逆さま対応）</strong></span>
       </label>
+
+      <div class="blank-page-box">
+        <label class="checkbox-row">
+          <input id="removeBlankPages" type="checkbox" checked />
+          <span><strong>白紙ページを自動で削除する</strong></span>
+        </label>
+        <label class="blank-sensitivity">
+          <span>白紙判定</span>
+          <select id="blankSensitivity">
+            <option value="careful" selected>慎重（おすすめ）</option>
+            <option value="normal">標準</option>
+            <option value="strong">強め</option>
+          </select>
+        </label>
+        <small>薄い文字や小さな書き込みを残したい場合は「慎重」を使用してください。</small>
+      </div>
 
       <div id="fileList" class="file-list empty">
         <div class="empty-message">まだ資料が追加されていません。</div>
       </div>
-      <div class="row-actions">
-        <button id="clearFiles" class="danger ghost">すべて削除</button>
+      <div class="row-actions split-actions">
+        <div id="analysisSummary" class="analysis-summary">資料を追加すると自動解析します。</div>
+        <div class="action-buttons">
+          <button id="reanalyzePages" class="secondary">向きを再判定</button>
+          <button id="clearFiles" class="danger ghost">すべて削除</button>
+        </div>
+      </div>
+
+      <div class="preview-section">
+        <div class="preview-heading">
+          <h3>ページ確認</h3>
+          <span>サムネイルを見て、必要なページだけ回転・除外できます。</span>
+        </div>
+        <div id="pagePreviewList" class="page-preview-list empty">
+          <div class="empty-message">解析したページのサムネイルがここに表示されます。</div>
+        </div>
       </div>
     </section>
 
@@ -160,6 +190,8 @@
   </dialog>
 
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6/dist/tesseract.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

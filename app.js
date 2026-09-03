@@ -1,6 +1,11 @@
 (() => {
   const { PDFDocument, degrees } = PDFLib;
 
+  if (window.pdfjsLib) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+  }
+
   const DEFAULTS = {
     year: ["2026年度","2025年度","2024年度","2023年度","2022年度","2021年度","2020年度","2019年度","2018年度","不明"],
     grade: ["小1","小2","小3","小4","小5","小6","中1","中2","中3","高1","高2","高3","その他"],
@@ -19,6 +24,9 @@
   let editSettings = structuredClone(settings);
   let files = [];
   let outputDirectoryHandle = null;
+  let analysisQueue = Promise.resolve();
+  let osdWorkerPromise = null;
+  let analysisRunning = false;
 
   const $ = (id) => document.getElementById(id);
   const selectors = ["year","grade","subject","testName","term","answer"];
@@ -79,13 +87,20 @@
       /\.(pdf|jpe?g|png)$/i.test(f.name)
     );
 
-    files.push(...accepted.map(file => ({
+    const added = accepted.map(file => ({
       id: crypto.randomUUID(),
       file,
-      rotation: 0
-    })));
+      rotation: 0,
+      pages: [],
+      analyzed: false,
+      analyzing: false,
+      analysisError: null
+    }));
 
+    files.push(...added);
     renderFiles();
+    renderPagePreviews();
+    queueAnalysis(added);
   }
 
   function openOriginal(item) {
@@ -99,6 +114,19 @@
     if (!item) return;
     item.rotation = normalizedRotation(item.rotation + delta);
     renderFiles();
+    renderPagePreviews();
+  }
+
+  function getPageFinalRotation(item, page) {
+    const auto = $("autoOrient").checked ? Number(page?.autoRotation || 0) : 0;
+    return normalizedRotation(auto + Number(item.rotation || 0) + Number(page?.manualRotation || 0));
+  }
+
+  function isPageExcluded(page) {
+    if (!page) return false;
+    if (page.manualExclude) return true;
+    if (page.keepOverride) return false;
+    return Boolean($("removeBlankPages").checked && page.isBlank);
   }
 
   function renderFiles() {
@@ -108,6 +136,7 @@
     if (!files.length) {
       list.classList.add("empty");
       list.innerHTML = '<div class="empty-message">まだ資料が追加されていません。</div>';
+      updateAnalysisSummary();
       return;
     }
 
@@ -132,11 +161,12 @@
 
       const meta = document.createElement("div");
       meta.className = "file-meta";
-      meta.textContent = `${typeLabel(item.file)} / ${humanSize(item.file.size)}`;
+      const pageText = item.analyzing ? " / 解析中…" : item.analyzed ? ` / ${item.pages.length}ページ` : "";
+      meta.textContent = `${typeLabel(item.file)} / ${humanSize(item.file.size)}${pageText}`;
 
       const rotation = document.createElement("span");
       rotation.className = "rotation-badge";
-      rotation.textContent = item.rotation === 0 ? "回転なし" : `回転 ${item.rotation}°`;
+      rotation.textContent = item.rotation === 0 ? "一括回転なし" : `一括回転 ${item.rotation}°`;
       meta.appendChild(rotation);
 
       info.append(name, meta);
@@ -153,13 +183,13 @@
       const left = document.createElement("button");
       left.type = "button";
       left.className = "small-button rotate-button";
-      left.textContent = "↶ 左90°";
+      left.textContent = "↶ 全体左90°";
       left.addEventListener("click", () => rotateItem(item.id, -90));
 
       const right = document.createElement("button");
       right.type = "button";
       right.className = "small-button rotate-button";
-      right.textContent = "↷ 右90°";
+      right.textContent = "↷ 全体右90°";
       right.addEventListener("click", () => rotateItem(item.id, 90));
 
       const del = document.createElement("button");
@@ -169,14 +199,182 @@
       del.addEventListener("click", () => {
         files = files.filter(x => x.id !== item.id);
         renderFiles();
+        renderPagePreviews();
       });
 
       actions.append(open, left, right, del);
-
       row.append(handle, info, actions);
       attachDragEvents(row);
       list.appendChild(row);
     });
+
+    updateAnalysisSummary();
+  }
+
+  function updateAnalysisSummary() {
+    const el = $("analysisSummary");
+    if (!el) return;
+    if (!files.length) {
+      el.textContent = "資料を追加すると自動解析します。";
+      el.className = "analysis-summary";
+      return;
+    }
+    const pages = files.flatMap(f => f.pages || []);
+    const analyzedFiles = files.filter(f => f.analyzed).length;
+    const blanks = pages.filter(p => p.isBlank).length;
+    const low = pages.filter(p => p.orientationConfidence != null && p.orientationConfidence < 2).length;
+    if (analysisRunning) {
+      el.textContent = `文字方向を解析中… ${analyzedFiles}/${files.length}ファイル`;
+      el.className = "analysis-summary analysis-progress";
+    } else {
+      el.textContent = `${pages.length}ページ確認済み / 白紙候補 ${blanks} / 向き判定が弱いページ ${low}`;
+      el.className = "analysis-summary";
+    }
+  }
+
+  function pageDisplayRotation(item, page) {
+    return getPageFinalRotation(item, page);
+  }
+
+  function renderPagePreviews() {
+    const box = $("pagePreviewList");
+    if (!box) return;
+    box.innerHTML = "";
+
+    const hasPages = files.some(f => (f.pages || []).length);
+    if (!hasPages) {
+      box.classList.add("empty");
+      box.innerHTML = '<div class="empty-message">解析したページのサムネイルがここに表示されます。</div>';
+      return;
+    }
+    box.classList.remove("empty");
+
+    files.forEach(item => {
+      if (!item.pages?.length) return;
+      const group = document.createElement("div");
+      group.className = "preview-group";
+
+      const title = document.createElement("div");
+      title.className = "preview-group-title";
+      title.innerHTML = `<span>${escapeHtml(item.file.name)}</span><small>${item.pages.length}ページ</small>`;
+      group.appendChild(title);
+
+      const grid = document.createElement("div");
+      grid.className = "thumbnail-grid";
+
+      item.pages.forEach(page => {
+        const excluded = isPageExcluded(page);
+        const card = document.createElement("div");
+        card.className = `page-card${excluded ? " excluded" : ""}${page.isBlank ? " blank-page" : ""}`;
+
+        const frame = document.createElement("div");
+        frame.className = "thumb-frame";
+        if (page.thumbnail) {
+          const img = document.createElement("img");
+          img.src = page.thumbnail;
+          img.alt = `${item.file.name} ${page.index + 1}ページ`;
+          img.style.transform = `rotate(${pageDisplayRotation(item, page)}deg)`;
+          frame.appendChild(img);
+        } else {
+          const ph = document.createElement("div");
+          ph.className = "thumb-placeholder";
+          ph.textContent = page.analyzing ? "解析中…" : "プレビューなし";
+          frame.appendChild(ph);
+        }
+
+        const body = document.createElement("div");
+        body.className = "page-card-body";
+
+        const ptitle = document.createElement("div");
+        ptitle.className = "page-title";
+        ptitle.textContent = `ページ ${page.index + 1}`;
+
+        const badges = document.createElement("div");
+        badges.className = "page-badges";
+
+        const autoBadge = document.createElement("span");
+        autoBadge.className = "page-badge good";
+        if (page.orientationDetected) {
+          autoBadge.textContent = `自動 ${page.autoRotation || 0}°`;
+        } else {
+          autoBadge.className = "page-badge warn";
+          autoBadge.textContent = "向き判定不可";
+        }
+        badges.appendChild(autoBadge);
+
+        if (page.orientationConfidence != null) {
+          const conf = document.createElement("span");
+          conf.className = `page-badge ${page.orientationConfidence < 2 ? "warn" : ""}`;
+          conf.textContent = `信頼 ${Number(page.orientationConfidence).toFixed(1)}`;
+          badges.appendChild(conf);
+        }
+
+        if (page.isBlank) {
+          const blank = document.createElement("span");
+          blank.className = "page-badge bad";
+          blank.textContent = "白紙候補";
+          badges.appendChild(blank);
+        }
+
+        if (page.manualRotation) {
+          const manual = document.createElement("span");
+          manual.className = "page-badge";
+          manual.textContent = `手動 ${page.manualRotation}°`;
+          badges.appendChild(manual);
+        }
+
+        const controls = document.createElement("div");
+        controls.className = "page-controls";
+
+        const left = document.createElement("button");
+        left.type = "button";
+        left.textContent = "↶ 左90°";
+        left.addEventListener("click", () => {
+          page.manualRotation = normalizedRotation(Number(page.manualRotation || 0) - 90);
+          renderPagePreviews();
+        });
+
+        const right = document.createElement("button");
+        right.type = "button";
+        right.textContent = "↷ 右90°";
+        right.addEventListener("click", () => {
+          page.manualRotation = normalizedRotation(Number(page.manualRotation || 0) + 90);
+          renderPagePreviews();
+        });
+
+        const exclude = document.createElement("button");
+        exclude.type = "button";
+        exclude.className = "exclude-button";
+        exclude.textContent = excluded ? "このページを残す" : "このページを除外";
+        exclude.addEventListener("click", () => {
+          if (excluded) {
+            page.manualExclude = false;
+            page.keepOverride = true;
+          } else {
+            page.manualExclude = true;
+            page.keepOverride = false;
+          }
+          renderPagePreviews();
+        });
+
+        controls.append(left, right, exclude);
+        body.append(ptitle, badges, controls);
+        card.append(frame, body);
+        grid.appendChild(card);
+      });
+
+      group.appendChild(grid);
+      box.appendChild(group);
+    });
+  }
+
+  function escapeHtml(value) {
+    return String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
   }
 
   function attachDragEvents(row) {
@@ -201,7 +399,244 @@
       e.preventDefault();
       const ids = Array.from(document.querySelectorAll(".file-item")).map(el => el.dataset.id);
       files.sort((a,b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+      renderPagePreviews();
     });
+  }
+
+  function queueAnalysis(items = files) {
+    analysisQueue = analysisQueue.then(async () => {
+      analysisRunning = true;
+      updateAnalysisSummary();
+      try {
+        for (const item of items) {
+          await analyzeFile(item);
+        }
+      } finally {
+        analysisRunning = false;
+        renderFiles();
+        renderPagePreviews();
+        updateAnalysisSummary();
+      }
+    });
+    return analysisQueue;
+  }
+
+  async function getOsdWorker() {
+    if (!window.Tesseract) throw new Error("文字方向判定ライブラリを読み込めませんでした。");
+    if (!osdWorkerPromise) {
+      osdWorkerPromise = window.Tesseract.createWorker("eng", 1, {
+        legacyCore: true,
+        legacyLang: true,
+        logger: m => {
+          if (m?.status && analysisRunning) {
+            const el = $("analysisSummary");
+            if (el && /loading|initializing/i.test(m.status)) {
+              el.textContent = `文字方向判定を準備中… ${Math.round((m.progress || 0) * 100)}%`;
+              el.className = "analysis-summary analysis-progress";
+            }
+          }
+        }
+      });
+    }
+    return osdWorkerPromise;
+  }
+
+  function makeThumbDataUrl(canvas, maxSide = 240) {
+    const scale = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
+    const thumb = document.createElement("canvas");
+    thumb.width = Math.max(1, Math.round(canvas.width * scale));
+    thumb.height = Math.max(1, Math.round(canvas.height * scale));
+    const ctx = thumb.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, thumb.width, thumb.height);
+    ctx.drawImage(canvas, 0, 0, thumb.width, thumb.height);
+    return thumb.toDataURL("image/jpeg", 0.78);
+  }
+
+  async function detectOrientationCorrection(canvas) {
+    if (!$("autoOrient").checked) {
+      return { rotation: 0, confidence: null, detected: false, script: null };
+    }
+
+    try {
+      const worker = await getOsdWorker();
+      const { data } = await worker.detect(canvas);
+      const orientation = Number(data?.orientation_degrees);
+      const confidence = Number(data?.orientation_confidence);
+
+      if ([0, 90, 180, 270].includes(orientation)) {
+        // Tesseract reports current orientation; rotate the opposite way to correct it.
+        const correction = normalizedRotation(360 - orientation);
+        return {
+          rotation: correction,
+          confidence: Number.isFinite(confidence) ? confidence : null,
+          detected: true,
+          script: data?.script || null
+        };
+      }
+    } catch (err) {
+      console.warn("Orientation detection failed", err);
+    }
+
+    // Fallback only handles landscape/portrait. Upside-down pages require OSD or manual check.
+    const fallback = canvas.width > canvas.height ? 90 : 0;
+    return { rotation: fallback, confidence: null, detected: false, script: null };
+  }
+
+  async function analyzeFile(item) {
+    item.analyzing = true;
+    item.analysisError = null;
+    item.pages = [];
+    renderFiles();
+    renderPagePreviews();
+
+    try {
+      const isPdf = item.file.type === "application/pdf" || item.file.name.toLowerCase().endsWith(".pdf");
+      if (isPdf) await analyzePdfFile(item);
+      else await analyzeImageFile(item);
+      item.analyzed = true;
+    } catch (err) {
+      console.error(err);
+      item.analysisError = String(err?.message || err);
+      item.analyzed = false;
+    } finally {
+      item.analyzing = false;
+      renderFiles();
+      renderPagePreviews();
+      updateAnalysisSummary();
+    }
+  }
+
+  async function analyzePdfFile(item) {
+    if (!window.pdfjsLib) throw new Error("PDF解析ライブラリを読み込めませんでした。");
+    const bytes = new Uint8Array(await item.file.arrayBuffer());
+    const pdf = await window.pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+
+    try {
+      for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+        const pageState = {
+          index: pageNo - 1,
+          thumbnail: null,
+          isBlank: false,
+          autoRotation: 0,
+          orientationConfidence: null,
+          orientationDetected: false,
+          orientationScript: null,
+          manualRotation: 0,
+          manualExclude: false,
+          keepOverride: false,
+          analyzing: true
+        };
+        item.pages.push(pageState);
+        renderPagePreviews();
+
+        const status = $("status");
+        status.className = "status working";
+        status.textContent = `${item.file.name}：ページ ${pageNo}/${pdf.numPages} の向きを解析中…`;
+
+        const page = await pdf.getPage(pageNo);
+        const base = page.getViewport({ scale: 1 });
+        const scale = Math.min(2, Math.max(0.7, 1050 / Math.max(base.width, base.height)));
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.ceil(viewport.width));
+        canvas.height = Math.max(1, Math.ceil(viewport.height));
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport, background: "white" }).promise;
+
+        pageState.thumbnail = makeThumbDataUrl(canvas);
+        pageState.isBlank = isCanvasBlank(canvas);
+
+        if (!pageState.isBlank) {
+          const detect = await detectOrientationCorrection(canvas);
+          pageState.autoRotation = detect.rotation;
+          pageState.orientationConfidence = detect.confidence;
+          pageState.orientationDetected = detect.detected;
+          pageState.orientationScript = detect.script;
+        }
+
+        pageState.analyzing = false;
+        page.cleanup();
+        renderPagePreviews();
+      }
+    } finally {
+      try { await pdf.destroy(); } catch {}
+    }
+  }
+
+  async function loadImageToCanvas(file, maxSide = 1200) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.decoding = "async";
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = url;
+      });
+      const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      return canvas;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function analyzeImageFile(item) {
+    const pageState = {
+      index: 0,
+      thumbnail: null,
+      isBlank: false,
+      autoRotation: 0,
+      orientationConfidence: null,
+      orientationDetected: false,
+      orientationScript: null,
+      manualRotation: 0,
+      manualExclude: false,
+      keepOverride: false,
+      analyzing: true
+    };
+    item.pages = [pageState];
+    renderPagePreviews();
+
+    const status = $("status");
+    status.className = "status working";
+    status.textContent = `${item.file.name}：画像の向きを解析中…`;
+
+    const canvas = await loadImageToCanvas(item.file, 1200);
+    pageState.thumbnail = makeThumbDataUrl(canvas);
+    pageState.isBlank = isCanvasBlank(canvas);
+    if (!pageState.isBlank) {
+      const detect = await detectOrientationCorrection(canvas);
+      pageState.autoRotation = detect.rotation;
+      pageState.orientationConfidence = detect.confidence;
+      pageState.orientationDetected = detect.detected;
+      pageState.orientationScript = detect.script;
+    }
+    pageState.analyzing = false;
+  }
+
+  async function reanalyzeAllPages() {
+    if (!files.length) return;
+    files.forEach(item => {
+      item.analyzed = false;
+      item.pages = [];
+      item.analysisError = null;
+    });
+    renderFiles();
+    renderPagePreviews();
+    await queueAnalysis([...files]);
+    const status = $("status");
+    status.className = "status ok";
+    status.textContent = "ページの向きを再判定しました。サムネイルで確認してください。";
   }
 
   function getLocalDateKey() {
@@ -349,6 +784,157 @@
     }
   }
 
+  function blankThresholds() {
+    const mode = $("blankSensitivity")?.value || "careful";
+
+    // Lower ratio / higher pixel threshold = more aggressive deletion.
+    if (mode === "strong") {
+      return { darkThreshold: 247, darkRatioLimit: 0.0035, meanDarknessLimit: 4.5 };
+    }
+    if (mode === "normal") {
+      return { darkThreshold: 244, darkRatioLimit: 0.0020, meanDarknessLimit: 3.2 };
+    }
+    // Careful: keep pages even when only a small amount of faint content exists.
+    return { darkThreshold: 240, darkRatioLimit: 0.0010, meanDarknessLimit: 2.2 };
+  }
+
+  function isCanvasBlank(canvas) {
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const { width, height } = canvas;
+    if (!width || !height) return true;
+
+    const imageData = ctx.getImageData(0, 0, width, height).data;
+    const { darkThreshold, darkRatioLimit, meanDarknessLimit } = blankThresholds();
+
+    let darkPixels = 0;
+    let darknessSum = 0;
+    let sampled = 0;
+
+    // Ignore a very small outer edge because scanners often create edge shadows.
+    const marginX = Math.max(1, Math.floor(width * 0.025));
+    const marginY = Math.max(1, Math.floor(height * 0.025));
+
+    for (let y = marginY; y < height - marginY; y += 1) {
+      for (let x = marginX; x < width - marginX; x += 1) {
+        const i = (y * width + x) * 4;
+        const a = imageData[i + 3] / 255;
+
+        // Composite transparency over white.
+        const r = imageData[i] * a + 255 * (1 - a);
+        const g = imageData[i + 1] * a + 255 * (1 - a);
+        const b = imageData[i + 2] * a + 255 * (1 - a);
+
+        const gray = (r + g + b) / 3;
+        darknessSum += 255 - gray;
+        sampled += 1;
+
+        if (Math.min(r, g, b) < darkThreshold) {
+          darkPixels += 1;
+        }
+      }
+    }
+
+    if (!sampled) return true;
+
+    const darkRatio = darkPixels / sampled;
+    const meanDarkness = darknessSum / sampled;
+
+    // A page is blank only if both tests say there is almost no content.
+    return darkRatio < darkRatioLimit && meanDarkness < meanDarknessLimit;
+  }
+
+  function makeAnalysisCanvas(sourceWidth, sourceHeight, maxSide = 360) {
+    const scale = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+    return { canvas, scale };
+  }
+
+  async function isImageFileBlank(file) {
+    if (!$("removeBlankPages").checked) return false;
+
+    const url = URL.createObjectURL(file);
+    try {
+      const image = new Image();
+      image.decoding = "async";
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = reject;
+        image.src = url;
+      });
+
+      const { canvas } = makeAnalysisCanvas(image.naturalWidth, image.naturalHeight);
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+      return isCanvasBlank(canvas);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function getNonBlankPdfPageIndices(file, status) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+
+    if (!$("removeBlankPages").checked || !window.pdfjsLib) {
+      // Use pdf-lib page count as fallback when blank detection is off/unavailable.
+      const src = await PDFDocument.load(bytes, { ignoreEncryption: false });
+      return {
+        bytes,
+        keepIndices: src.getPageIndices(),
+        removedCount: 0,
+        blankCheckAvailable: Boolean(window.pdfjsLib)
+      };
+    }
+
+    const loadingTask = window.pdfjsLib.getDocument({ data: bytes });
+    const pdf = await loadingTask.promise;
+    const keepIndices = [];
+    let removedCount = 0;
+
+    try {
+      for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+        status.textContent =
+          `${file.name}：白紙チェック ${pageNo}/${pdf.numPages} ページ…`;
+
+        const page = await pdf.getPage(pageNo);
+        const baseViewport = page.getViewport({ scale: 1 });
+        const targetScale = Math.min(
+          0.6,
+          360 / Math.max(baseViewport.width, baseViewport.height)
+        );
+        const viewport = page.getViewport({ scale: Math.max(0.1, targetScale) });
+
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.ceil(viewport.width));
+        canvas.height = Math.max(1, Math.ceil(viewport.height));
+
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        await page.render({
+          canvasContext: ctx,
+          viewport,
+          background: "white"
+        }).promise;
+
+        const blank = isCanvasBlank(canvas);
+        if (blank) removedCount += 1;
+        else keepIndices.push(pageNo - 1);
+
+        page.cleanup();
+      }
+    } finally {
+      try { await pdf.destroy(); } catch {}
+    }
+
+    return { bytes, keepIndices, removedCount, blankCheckAvailable: true };
+  }
+
   function autoPortraitRotation(width, height, rotation) {
     const r = normalizedRotation(rotation);
     const swaps = r === 90 || r === 270;
@@ -362,6 +948,7 @@
   }
 
   async function rotateImageFile(file, rotation) {
+    const normalized = normalizedRotation(rotation);
     const url = URL.createObjectURL(file);
 
     try {
@@ -373,25 +960,14 @@
         image.src = url;
       });
 
-      const normalized = autoPortraitRotation(
-        image.naturalWidth,
-        image.naturalHeight,
-        rotation
-      );
-
-      if (normalized === 0) {
-        return {
-          bytes: new Uint8Array(await file.arrayBuffer()),
-          kind: (file.type === "image/png" || file.name.toLowerCase().endsWith(".png")) ? "png" : "jpg"
-        };
-      }
-
       const swap = normalized === 90 || normalized === 270;
       const canvas = document.createElement("canvas");
       canvas.width = swap ? image.naturalHeight : image.naturalWidth;
       canvas.height = swap ? image.naturalWidth : image.naturalHeight;
 
       const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.translate(canvas.width / 2, canvas.height / 2);
       ctx.rotate(normalized * Math.PI / 180);
       ctx.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
@@ -409,8 +985,8 @@
     }
   }
 
-  async function addImageAsA4(pdfDoc, item) {
-    const rotated = await rotateImageFile(item.file, item.rotation);
+  async function addImageAsA4(pdfDoc, item, rotation) {
+    const rotated = await rotateImageFile(item.file, rotation);
     let image;
 
     if (rotated.kind === "png") image = await pdfDoc.embedPng(rotated.bytes);
@@ -571,10 +1147,21 @@
     try {
       $("buildPdf").disabled = true;
       status.className = "status working";
-      status.textContent = "PDFを作成しています…";
+      status.textContent = "ページ解析の完了を確認しています…";
 
+      await analysisQueue;
+      const notAnalyzed = files.filter(f => !f.analyzed);
+      if (notAnalyzed.length) {
+        await queueAnalysis(notAnalyzed);
+      }
+      await analysisQueue;
+
+      status.textContent = "PDFを作成しています…";
       const documentId = getPendingDocumentId();
       const out = await PDFDocument.create();
+      let removedBlankPages = 0;
+      let manuallyExcludedPages = 0;
+      let contentPagesAdded = 0;
 
       if ($("addCover").checked) {
         status.textContent = "管理表紙を作成しています…";
@@ -595,18 +1182,42 @@
           item.file.type === "application/pdf" ||
           item.file.name.toLowerCase().endsWith(".pdf");
 
-        if (isPdf) {
-          const src = await PDFDocument.load(
-            await item.file.arrayBuffer(),
-            { ignoreEncryption: false }
-          );
+        const pages = item.pages || [];
 
-          const copied = await out.copyPages(src, src.getPageIndices());
-          rotateCopiedPdfPages(copied, item.rotation);
-          copied.forEach(p => out.addPage(p));
-        } else {
-          await addImageAsA4(out, item);
+        if (isPdf) {
+          const srcBytes = await item.file.arrayBuffer();
+          const src = await PDFDocument.load(srcBytes, { ignoreEncryption: false });
+
+          for (const pageState of pages) {
+            const excluded = isPageExcluded(pageState);
+            if (excluded) {
+              if (pageState.isBlank && !pageState.manualExclude) removedBlankPages += 1;
+              else manuallyExcludedPages += 1;
+              continue;
+            }
+
+            const [copied] = await out.copyPages(src, [pageState.index]);
+            const current = copied.getRotation().angle || 0;
+            const correction = getPageFinalRotation(item, pageState);
+            copied.setRotation(degrees(normalizedRotation(current + correction)));
+            out.addPage(copied);
+            contentPagesAdded += 1;
+          }
+        } else if (pages[0]) {
+          const pageState = pages[0];
+          const excluded = isPageExcluded(pageState);
+          if (excluded) {
+            if (pageState.isBlank && !pageState.manualExclude) removedBlankPages += 1;
+            else manuallyExcludedPages += 1;
+          } else {
+            await addImageAsA4(out, item, getPageFinalRotation(item, pageState));
+            contentPagesAdded += 1;
+          }
         }
+      }
+
+      if (contentPagesAdded === 0) {
+        throw new Error("資料ページがすべて白紙と判定されました。白紙判定をOFFにするか、判定を「慎重」にして確認してください。");
       }
 
       status.textContent = "保存用PDFを仕上げています…";
@@ -618,18 +1229,30 @@
       updateFilenamePreview();
 
       status.className = "status ok";
+      let message = "";
       if (result.mode === "folder") {
-        status.textContent = `「${result.folder}」に ${filename} を保存しました。元ファイルは変更されていません。`;
+        message = `「${result.folder}」に ${filename} を保存しました。`;
       } else if (result.mode === "filepicker") {
-        status.textContent = `${filename} を選択した場所へ保存しました。元ファイルは変更されていません。`;
+        message = `${filename} を選択した場所へ保存しました。`;
       } else {
-        status.textContent = "PDFを作成しました。通常のダウンロード先へ保存しました。元ファイルは変更されていません。";
+        message = "PDFを作成し、通常のダウンロード先へ保存しました。";
       }
+
+      if ($("removeBlankPages").checked) {
+        message += ` 白紙 ${removedBlankPages}ページを削除しました。`;
+      }
+      if (manuallyExcludedPages) {
+        message += ` 手動で ${manuallyExcludedPages}ページを除外しました。`;
+      }
+      message += " 元ファイルは変更されていません。";
+      status.textContent = message;
     } catch (err) {
       console.error(err);
       status.className = "status error";
 
-      if (/encrypted/i.test(String(err))) {
+      if (/すべて白紙/.test(String(err))) {
+        status.textContent = String(err.message || err);
+      } else if (/encrypted/i.test(String(err))) {
         status.textContent = "パスワード保護されたPDFは処理できません。保護を解除したPDFを使用してください。";
       } else {
         status.textContent = "PDF作成中にエラーが発生しました。別のPDF/画像で試してください。";
@@ -806,16 +1429,38 @@
     if (confirm("追加したファイルをすべて一覧から削除しますか？")) {
       files = [];
       renderFiles();
+      renderPagePreviews();
     }
   });
 
-  $("autoOrient").addEventListener("change", () => {
+  $("autoOrient").addEventListener("change", async () => {
     const status = $("status");
     status.className = "status";
-    status.textContent = $("autoOrient").checked
-      ? "自動縦向き補正：ON"
-      : "自動縦向き補正：OFF（手動回転のみ）";
+    if ($("autoOrient").checked) {
+      status.textContent = "文字向き自動判定：ON。必要なら「向きを再判定」を押してください。";
+    } else {
+      status.textContent = "文字向き自動判定：OFF（サムネイルから手動回転できます）。";
+    }
+    renderPagePreviews();
   });
+
+  $("removeBlankPages").addEventListener("change", () => {
+    const status = $("status");
+    status.className = "status";
+    status.textContent = $("removeBlankPages").checked
+      ? "白紙ページ自動削除：ON"
+      : "白紙ページ自動削除：OFF";
+    renderPagePreviews();
+    updateAnalysisSummary();
+  });
+
+  $("blankSensitivity").addEventListener("change", () => {
+    const status = $("status");
+    status.className = "status";
+    status.textContent = "白紙判定の強さを変更しました。既存ページへ反映するには「向きを再判定」を押してください。";
+  });
+
+  $("reanalyzePages").addEventListener("click", reanalyzeAllPages);
 
   $("chooseFolder").addEventListener("click", chooseOutputFolder);
   $("buildPdf").addEventListener("click", buildPdf);
@@ -841,4 +1486,5 @@
   updateBrowserSupportMessage();
   populateSelects();
   renderFiles();
+  renderPagePreviews();
 })();
