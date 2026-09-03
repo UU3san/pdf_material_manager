@@ -349,16 +349,19 @@
     }
   }
 
-  async function rotateImageFile(file, rotation) {
-    const normalized = normalizedRotation(rotation);
+  function autoPortraitRotation(width, height, rotation) {
+    const r = normalizedRotation(rotation);
+    const swaps = r === 90 || r === 270;
+    const visualWidth = swaps ? height : width;
+    const visualHeight = swaps ? width : height;
 
-    if (normalized === 0) {
-      return {
-        bytes: new Uint8Array(await file.arrayBuffer()),
-        kind: (file.type === "image/png" || file.name.toLowerCase().endsWith(".png")) ? "png" : "jpg"
-      };
+    if ($("autoOrient").checked && visualWidth > visualHeight) {
+      return normalizedRotation(r + 90);
     }
+    return r;
+  }
 
+  async function rotateImageFile(file, rotation) {
     const url = URL.createObjectURL(file);
 
     try {
@@ -369,6 +372,19 @@
         image.onerror = reject;
         image.src = url;
       });
+
+      const normalized = autoPortraitRotation(
+        image.naturalWidth,
+        image.naturalHeight,
+        rotation
+      );
+
+      if (normalized === 0) {
+        return {
+          bytes: new Uint8Array(await file.arrayBuffer()),
+          kind: (file.type === "image/png" || file.name.toLowerCase().endsWith(".png")) ? "png" : "jpg"
+        };
+      }
 
       const swap = normalized === 90 || normalized === 270;
       const canvas = document.createElement("canvas");
@@ -420,12 +436,20 @@
   }
 
   function rotateCopiedPdfPages(pages, delta) {
-    const normalized = normalizedRotation(delta);
-    if (normalized === 0) return;
-
     pages.forEach(page => {
       const current = page.getRotation().angle || 0;
-      page.setRotation(degrees(normalizedRotation(current + normalized)));
+      let target = normalizedRotation(current + delta);
+
+      const { width, height } = page.getSize();
+      const swaps = target === 90 || target === 270;
+      const visualWidth = swaps ? height : width;
+      const visualHeight = swaps ? width : height;
+
+      if ($("autoOrient").checked && visualWidth > visualHeight) {
+        target = normalizedRotation(target + 90);
+      }
+
+      page.setRotation(degrees(target));
     });
   }
 
@@ -783,6 +807,14 @@
       files = [];
       renderFiles();
     }
+  });
+
+  $("autoOrient").addEventListener("change", () => {
+    const status = $("status");
+    status.className = "status";
+    status.textContent = $("autoOrient").checked
+      ? "自動縦向き補正：ON"
+      : "自動縦向き補正：OFF（手動回転のみ）";
   });
 
   $("chooseFolder").addEventListener("click", chooseOutputFolder);
