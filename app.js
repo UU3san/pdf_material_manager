@@ -204,6 +204,40 @@
     });
   }
 
+  function getLocalDateKey() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}${m}${day}`;
+  }
+
+  function loadDailyCounters() {
+    try {
+      return JSON.parse(localStorage.getItem("pdfMaterialDailyCounters") || "{}");
+    } catch {
+      return {};
+    }
+  }
+
+  function getPendingDocumentId() {
+    const dateKey = getLocalDateKey();
+    const counters = loadDailyCounters();
+    const next = Number(counters[dateKey] || 0) + 1;
+    return `${dateKey}-${String(next).padStart(3, "0")}`;
+  }
+
+  function commitDocumentId(documentId) {
+    const match = /^(\d{8})-(\d+)$/.exec(documentId);
+    if (!match) return;
+
+    const [, dateKey, serialText] = match;
+    const serial = Number(serialText);
+    const counters = loadDailyCounters();
+    counters[dateKey] = Math.max(Number(counters[dateKey] || 0), serial);
+    localStorage.setItem("pdfMaterialDailyCounters", JSON.stringify(counters));
+  }
+
   function safePart(s) {
     return (s || "")
       .replace(/[\\/:*?"<>|]/g, "")
@@ -211,16 +245,19 @@
       .slice(0, 50);
   }
 
-  function buildFilename() {
+  function buildFilename(documentId = getPendingDocumentId()) {
     const parts = selectors.map(id => safePart($(id).value)).filter(Boolean);
-    return (parts.join("_") || "資料") + ".pdf";
+    const detail = parts.join("_") || "資料";
+    return `${documentId}_${detail}.pdf`;
   }
 
   function updateFilenamePreview() {
-    $("filenamePreview").textContent = buildFilename();
+    const documentId = getPendingDocumentId();
+    $("documentIdPreview").textContent = documentId;
+    $("filenamePreview").textContent = buildFilename(documentId);
   }
 
-  async function createCoverPng() {
+  async function createCoverPng(documentId) {
     const canvas = document.createElement("canvas");
     canvas.width = 1240;
     canvas.height = 1754;
@@ -239,6 +276,7 @@
     ctx.strokeRect(120, 220, 1000, 1040);
 
     const rows = [
+      ["管理番号", documentId],
       ["年度", $("year").value],
       ["学年", $("grade").value],
       ["科目", $("subject").value],
@@ -248,8 +286,8 @@
     ];
 
     ctx.textAlign = "left";
-    const startY = 330;
-    const rowH = 145;
+    const startY = 310;
+    const rowH = 125;
 
     rows.forEach((r, i) => {
       const y = startY + i * rowH;
@@ -471,11 +509,12 @@
       status.className = "status working";
       status.textContent = "PDFを作成しています…";
 
+      const documentId = getPendingDocumentId();
       const out = await PDFDocument.create();
 
       if ($("addCover").checked) {
         status.textContent = "管理表紙を作成しています…";
-        const coverPng = await createCoverPng();
+        const coverPng = await createCoverPng(documentId);
         const coverImg = await out.embedPng(coverPng);
 
         const pageW = 595.28;
@@ -508,9 +547,11 @@
 
       status.textContent = "保存用PDFを仕上げています…";
       const pdfBytes = await out.save();
-      const filename = buildFilename();
+      const filename = buildFilename(documentId);
 
       const result = await savePdfBytes(pdfBytes, filename);
+      commitDocumentId(documentId);
+      updateFilenamePreview();
 
       status.className = "status ok";
       if (result.mode === "folder") {
