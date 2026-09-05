@@ -196,6 +196,24 @@
     }
   }
 
+  function isPdfFile(file) {
+    return file?.type === "application/pdf" ||
+      String(file?.name || "").toLowerCase().endsWith(".pdf");
+  }
+
+  function pdfNeedsDetailedProcessing(item) {
+    if (!isPdfFile(item?.file)) return false;
+    if (!$("fastPdfMode")?.checked) return true;
+    if (item.forceDetailed) return true;
+    if (Number(item.rotation || 0) !== 0) return true;
+
+    return (item.pages || []).some(page =>
+      Number(page.manualRotation || 0) !== 0 ||
+      Boolean(page.manualExclude) ||
+      Boolean(page.keepOverride)
+    );
+  }
+
   async function addFiles(fileList) {
     const accepted = Array.from(fileList).filter(f =>
       /application\/pdf|image\/jpeg|image\/png/.test(f.type) ||
@@ -229,6 +247,7 @@
       analyzed: false,
       analyzing: false,
       analysisError: null,
+      forceDetailed: false,
       managedDocument: Boolean(managedParsed && idx === 0),
       skipExistingCover: Boolean(managedParsed && idx === 0)
     }));
@@ -241,7 +260,19 @@
 
     renderFiles();
     renderPagePreviews();
-    queueAnalysis(added);
+
+    const toAnalyze = added.filter(item =>
+      !isPdfFile(item.file) || pdfNeedsDetailedProcessing(item)
+    );
+
+    if (toAnalyze.length) {
+      queueAnalysis(toAnalyze);
+    } else {
+      const status = $("status");
+      status.className = "status ok";
+      status.textContent = "PDF高速モード：本文は解析せず、保存時に表紙だけ追加します。";
+      updateAnalysisSummary();
+    }
   }
 
   function openOriginal(item) {
@@ -254,6 +285,10 @@
     const item = files.find(x => x.id === id);
     if (!item) return;
     item.rotation = normalizedRotation(item.rotation + delta);
+    if (isPdfFile(item.file)) {
+      item.forceDetailed = true;
+      if (!item.analyzed && !item.analyzing) queueAnalysis([item]);
+    }
     renderFiles();
     renderPagePreviews();
   }
@@ -303,8 +338,16 @@
 
       const meta = document.createElement("div");
       meta.className = "file-meta";
-      const pageText = item.analyzing ? " / 解析中…" : item.analyzed ? ` / ${item.pages.length}ページ` : "";
+      const fastPdf = isPdfFile(item.file) && $("fastPdfMode")?.checked && !pdfNeedsDetailedProcessing(item);
+      const pageText = item.analyzing ? " / 解析中…" : item.analyzed ? ` / ${item.pages.length}ページ` : fastPdf ? " / 高速" : "";
       meta.textContent = `${typeLabel(item.file)} / ${humanSize(item.file.size)}${pageText}`;
+
+      if (fastPdf) {
+        const fast = document.createElement("span");
+        fast.className = "fast-badge";
+        fast.textContent = "表紙追加のみ";
+        meta.appendChild(fast);
+      }
 
       const rotation = document.createElement("span");
       rotation.className = "rotation-badge";
@@ -334,6 +377,22 @@
       right.textContent = "↷ 全体右90°";
       right.addEventListener("click", () => rotateItem(item.id, 90));
 
+      let detail = null;
+      if (isPdfFile(item.file)) {
+        detail = document.createElement("button");
+        detail.type = "button";
+        detail.className = "small-button detail-button";
+        detail.textContent = item.forceDetailed ? "高速に戻す" : "詳細編集";
+        detail.addEventListener("click", () => {
+          item.forceDetailed = !item.forceDetailed;
+          if (item.forceDetailed && !item.analyzed && !item.analyzing) {
+            queueAnalysis([item]);
+          }
+          renderFiles();
+          renderPagePreviews();
+        });
+      }
+
       const del = document.createElement("button");
       del.type = "button";
       del.className = "small-button danger";
@@ -344,7 +403,9 @@
         renderPagePreviews();
       });
 
-      actions.append(open, left, right, del);
+      actions.append(open, left, right);
+      if (detail) actions.append(detail);
+      actions.append(del);
       row.append(handle, info, actions);
       attachDragEvents(row);
       list.appendChild(row);
@@ -362,6 +423,7 @@
       return;
     }
     const pages = files.flatMap(f => f.pages || []);
+    const fastFiles = files.filter(f => isPdfFile(f.file) && $("fastPdfMode")?.checked && !pdfNeedsDetailedProcessing(f)).length;
     const analyzedFiles = files.filter(f => f.analyzed).length;
     const blanks = pages.filter(p => p.isBlank).length;
     const low = pages.filter(p => p.orientationConfidence != null && p.orientationConfidence < 2).length;
@@ -369,7 +431,9 @@
       el.textContent = `文字方向を解析中… ${analyzedFiles}/${files.length}ファイル`;
       el.className = "analysis-summary analysis-progress";
     } else {
-      el.textContent = `${pages.length}ページ確認済み / 白紙候補 ${blanks} / 向き判定が弱いページ ${low}`;
+      el.textContent = fastFiles
+        ? `高速PDF ${fastFiles}件（解析なし） / 詳細確認 ${pages.length}ページ / 白紙候補 ${blanks}`
+        : `${pages.length}ページ確認済み / 白紙候補 ${blanks} / 向き判定が弱いページ ${low}`;
       el.className = "analysis-summary";
     }
   }
@@ -386,7 +450,12 @@
     const hasPages = files.some(f => (f.pages || []).length);
     if (!hasPages) {
       box.classList.add("empty");
-      box.innerHTML = '<div class="empty-message">解析したページのサムネイルがここに表示されます。</div>';
+      const hasFastPdf = files.some(item =>
+        isPdfFile(item.file) && $("fastPdfMode")?.checked && !pdfNeedsDetailedProcessing(item)
+      );
+      box.innerHTML = hasFastPdf
+        ? '<div class="empty-message">高速PDFはサムネイル解析を省略しています。修正したいPDFだけ［詳細編集］を押してください。</div>'
+        : '<div class="empty-message">解析したページのサムネイルがここに表示されます。</div>';
       return;
     }
     box.classList.remove("empty");
@@ -1596,7 +1665,10 @@
       status.textContent = "ページ解析の完了を確認しています…";
 
       await analysisQueue;
-      const notAnalyzed = files.filter(f => !f.analyzed);
+      const notAnalyzed = files.filter(item =>
+        !item.analyzed &&
+        (!isPdfFile(item.file) || pdfNeedsDetailedProcessing(item))
+      );
       if (notAnalyzed.length) {
         await queueAnalysis(notAnalyzed);
       }
@@ -1650,8 +1722,24 @@
 
         if (isPdf) {
           const srcBytes = new Uint8Array(await item.file.arrayBuffer());
+          const useFastPdf = $("fastPdfMode")?.checked && !pdfNeedsDetailedProcessing(item);
 
-          if ($("rebuildScanPdf")?.checked && window.pdfjsLib) {
+          if (useFastPdf) {
+            status.textContent = `${item.file.name}：元PDFをそのまま高速結合中…`;
+            const src = await PDFDocument.load(srcBytes, { ignoreEncryption: false });
+            let sourceIndices = src.getPageIndices();
+
+            // Re-editing a managed PDF: replace the old cover instead of duplicating it.
+            if (item.skipExistingCover && sourceIndices.length > 0) {
+              sourceIndices = sourceIndices.slice(1);
+            }
+
+            if (sourceIndices.length > 0) {
+              const copied = await out.copyPages(src, sourceIndices);
+              copied.forEach(page => out.addPage(page));
+              contentPagesAdded += copied.length;
+            }
+          } else if ($("rebuildScanPdf")?.checked && window.pdfjsLib) {
             const pdfJs = await window.pdfjsLib.getDocument({
               data: srcBytes.slice()
             }).promise;
@@ -2013,6 +2101,26 @@
   $("rotateSelectedLeft").addEventListener("click", () => rotateSelectedPages(-90));
   $("rotateSelectedRight").addEventListener("click", () => rotateSelectedPages(90));
   $("rotateSelected180").addEventListener("click", () => rotateSelectedPages(180));
+
+  $("fastPdfMode").addEventListener("change", () => {
+    const enabled = $("fastPdfMode").checked;
+    const status = $("status");
+    status.className = "status";
+
+    if (enabled) {
+      status.textContent = "PDF高速モード：ON。通常PDFは表紙追加のみで保存します。";
+    } else {
+      status.textContent = "PDF高速モード：OFF。すべてのPDFを詳細解析します。";
+      const targets = files.filter(item =>
+        isPdfFile(item.file) && !item.analyzed && !item.analyzing
+      );
+      if (targets.length) queueAnalysis(targets);
+    }
+
+    renderFiles();
+    renderPagePreviews();
+    updateAnalysisSummary();
+  });
 
   $("rebuildScanPdf").addEventListener("change", () => {
     const status = $("status");

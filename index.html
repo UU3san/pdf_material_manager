@@ -61,6 +61,17 @@
         <small>薄い文字や小さな書き込みを残したい場合は「慎重」を使用してください。</small>
       </div>
 
+      <div class="fast-pdf-box">
+        <label class="checkbox-row">
+          <input id="fastPdfMode" type="checkbox" checked />
+          <span><strong>完成済みPDFはそのまま使い、表紙だけ追加する（高速）</strong></span>
+        </label>
+        <small>
+          通常のPDFは向き判定・白紙判定・画像化をせず、そのまま結合します。
+          修正が必要なPDFだけ一覧の［詳細編集］を押してください。
+        </small>
+      </div>
+
       <div id="fileList" class="file-list empty">
         <div class="empty-message">まだ資料が追加されていません。</div>
       </div>
@@ -145,7 +156,7 @@
 
         <label class="checkbox-row rebuild-row">
           <input id="rebuildScanPdf" type="checkbox" checked />
-          <span><strong>スキャンPDFも画像として再構成し、用紙いっぱいに補正する</strong></span>
+          <span><strong>［詳細編集時］スキャンPDFも画像として再構成し、用紙いっぱいに補正する</strong></span>
         </label>
 
         <label class="checkbox-row rebuild-row">
